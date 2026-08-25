@@ -40,6 +40,7 @@ git-ignored and must never be committed.
 | `assign`      | Assign an existing issue to a user                                   |
 | `mysprint`    | List issues assigned to you (the PAT owner) in any open sprint, including each issue's Sprint id/name |
 | `field`       | Look up custom field ids by (partial, case-insensitive) name match   |
+| `search`      | Look up issue(s) by issue key or free text and print their full content |
 
 ### Usage
 
@@ -51,6 +52,7 @@ git-ignored and must never be committed.
 ./jira-cli.sh assign      <ISSUE-KEY> <assignee-username>                   [env-file]
 ./jira-cli.sh mysprint    [PROJECT-KEY]                                     [env-file]
 ./jira-cli.sh field       <search-term>                                     [env-file]
+./jira-cli.sh search      <ISSUE-KEY | "text to search">  [--project <PROJECT-KEY>] [--sprint] [--env <env-file>]
 ```
 
 Running the script with no arguments (or `-h`/`--help`) prints the full
@@ -67,6 +69,8 @@ usage/help text and exits without making any Jira calls.
 ./jira-cli.sh assign EAWM-7385 adam.schaefer2@va.gov
 ./jira-cli.sh mysprint EAWM
 ./jira-cli.sh field sprint
+./jira-cli.sh search EAWM-8812
+./jira-cli.sh search "Account Re-use" --project EAWM --sprint
 ```
 
 ## How each action works
@@ -122,6 +126,18 @@ usage/help text and exits without making any Jira calls.
   (`customfield_10001`) and Sprint (`customfield_10000`) field ids for
   `create --epic`/`--sprint` — it's now a first-class action so that
   lookup is repeatable instead of a one-off throwaway script.
+- **`search`** — Looks up issue(s) and prints their **full** content
+  (unlike `mysprint`'s 300-character description snippet). If the query
+  looks like an issue key (e.g. `EAWM-8812`), it's fetched directly via
+  `GET /rest/api/2/issue/<key>`. Otherwise the query is treated as free
+  text and run as a JQL `text ~ "<query>"` search via
+  `GET /rest/api/2/search` (Jira's full-text search across
+  summary/description/comments/etc.), optionally narrowed with
+  `--project <PROJECT-KEY>` and/or `--sprint` (adds
+  `AND sprint in openSprints()`, matching `mysprint`'s open-sprint
+  scoping). Each result prints key, browse URL, issue type, status,
+  assignee, Sprint (id/name/state), full summary/description, and any
+  comments.
 
 ## Why it works this way
 
