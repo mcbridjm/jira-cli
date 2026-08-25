@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# jira-issue-update.sh
+# jira-cli.sh
 #
 # Updates or creates Jira issues via the REST API using a Personal Access
 # Token (PAT). The token is loaded from a local .env file (variable PAT)
@@ -24,25 +24,32 @@
 #   field       - look up custom field ids by (partial, case-insensitive)
 #                 name match, e.g. to (re)discover the Epic Link / Sprint
 #                 field ids on this Jira instance
+#   search      - look up issue(s) by issue key OR free-text search, and
+#                 print the FULL content (summary, status, type, assignee,
+#                 sprint, full description, comments) of each match -
+#                 optionally scoped to a project and/or the open sprint
 #
 # Usage:
-#   ./jira-issue-update.sh comment     <ISSUE-KEY> "<comment text>"          [env-file]
-#   ./jira-issue-update.sh description <ISSUE-KEY> "<description text>"     [env-file]
-#   ./jira-issue-update.sh transition  <ISSUE-KEY> "<target status name>"   [env-file]
-#   ./jira-issue-update.sh create      <PROJECT-KEY> "<summary>" "<description>" [--type <issuetype>] [--assignee <username>] [--epic <EPIC-KEY>] [--sprint <sprint-id>] [--env <env-file>]
-#   ./jira-issue-update.sh assign      <ISSUE-KEY> <assignee-username>       [env-file]
-#   ./jira-issue-update.sh mysprint    [PROJECT-KEY] [env-file]
-#   ./jira-issue-update.sh field       <search-term> [env-file]
+#   ./jira-cli.sh comment     <ISSUE-KEY> "<comment text>"          [env-file]
+#   ./jira-cli.sh description <ISSUE-KEY> "<description text>"     [env-file]
+#   ./jira-cli.sh transition  <ISSUE-KEY> "<target status name>"   [env-file]
+#   ./jira-cli.sh create      <PROJECT-KEY> "<summary>" "<description>" [--type <issuetype>] [--assignee <username>] [--epic <EPIC-KEY>] [--sprint <sprint-id>] [--env <env-file>]
+#   ./jira-cli.sh assign      <ISSUE-KEY> <assignee-username>       [env-file]
+#   ./jira-cli.sh mysprint    [PROJECT-KEY] [env-file]
+#   ./jira-cli.sh field       <search-term> [env-file]
+#   ./jira-cli.sh search      <ISSUE-KEY | "text to search">  [--project <PROJECT-KEY>] [--sprint] [--env <env-file>]
 #
 # Examples:
-#   ./jira-issue-update.sh comment EAWM-7384 "Applied topology spread constraints."
-#   ./jira-issue-update.sh description EAWM-7384 "$(cat new-description.txt)"
-#   ./jira-issue-update.sh transition EAWM-7384 "Resolved"
-#   ./jira-issue-update.sh create EAWM "Promote topology spread constraints to Production" "$(cat followup-desc.txt)" --type Story --assignee adam.schaefer2@va.gov
-#   ./jira-issue-update.sh create EAWM "Research OCR true-up" "$(cat desc.txt)" --epic EAWM-8837 --sprint 52476 --assignee adam.schaefer2@va.gov
-#   ./jira-issue-update.sh assign EAWM-7385 adam.schaefer2@va.gov
-#   ./jira-issue-update.sh mysprint EAWM
-#   ./jira-issue-update.sh field sprint
+#   ./jira-cli.sh comment EAWM-7384 "Applied topology spread constraints."
+#   ./jira-cli.sh description EAWM-7384 "$(cat new-description.txt)"
+#   ./jira-cli.sh transition EAWM-7384 "Resolved"
+#   ./jira-cli.sh create EAWM "Promote topology spread constraints to Production" "$(cat followup-desc.txt)" --type Story --assignee adam.schaefer2@va.gov
+#   ./jira-cli.sh create EAWM "Research OCR true-up" "$(cat desc.txt)" --epic EAWM-8837 --sprint 52476 --assignee adam.schaefer2@va.gov
+#   ./jira-cli.sh assign EAWM-7385 adam.schaefer2@va.gov
+#   ./jira-cli.sh mysprint EAWM
+#   ./jira-cli.sh field sprint
+#   ./jira-cli.sh search EAWM-8812
+#   ./jira-cli.sh search "Account Re-use" --project EAWM --sprint
 #
 # Notes on 'assign' / create's --assignee (the issue "owner"):
 #   The assignee value must be the Jira account's "name" (username), which
@@ -57,11 +64,24 @@
 #   instance: Epic Link = customfield_10001 (takes the epic's issue key,
 #   e.g. EAWM-8837) and Sprint = customfield_10000 (takes the sprint's
 #   numeric id, e.g. 52476 - NOT its display name). Run
-#   `./jira-issue-update.sh mysprint <PROJECT-KEY>` to see the active
+#   `./jira-cli.sh mysprint <PROJECT-KEY>` to see the active
 #   sprint's id/name from issues already in it, or
-#   `./jira-issue-update.sh field sprint` / `field epic` to re-discover the
+#   `./jira-cli.sh field sprint` / `field epic` to re-discover the
 #   field ids if this ever changes (e.g. on a different Jira project or
 #   instance where custom field ids differ).
+#
+# Notes on 'search':
+#   If the query looks like an issue key (e.g. EAWM-8812 - letters, a dash,
+#   digits), it is fetched directly via GET /rest/api/2/issue/<key> and its
+#   full content is printed. Otherwise the query is treated as free text
+#   and run as a JQL `text ~ "<query>"` search (Jira's full-text search
+#   across summary/description/comments/etc.), optionally narrowed with
+#   `--project <PROJECT-KEY>` and/or `--sprint` (adds
+#   `AND sprint in openSprints()`, matching the same open-sprint scoping
+#   used by 'mysprint'). Unlike 'mysprint', which truncates descriptions to
+#   300 characters for a quick scan, 'search' prints each match's FULL
+#   description (and top-level comments) since the point is to retrieve
+#   complete issue content, not a summary list.
 #
 # Notes on 'transition':
 #   Jira workflows often require multiple hops (e.g. To Do -> In Work ->
@@ -78,7 +98,7 @@
 set -euo pipefail
 
 if [[ $# -lt 1 ]]; then
-  echo "Usage: $0 <comment|description|transition|create|assign|mysprint|field> ..." >&2
+  echo "Usage: $0 <comment|description|transition|create|assign|mysprint|field|search> ..." >&2
   echo "Run with -h for full usage." >&2
   exit 1
 fi
@@ -161,8 +181,31 @@ case "$ACTION" in
     FIELD_SEARCH="$1"
     ENV_FILE="${2:-$(dirname "$0")/.env}"
     ;;
+  search)
+    if [[ $# -lt 1 ]]; then
+      echo "Usage: $0 search <ISSUE-KEY | \"text to search\"> [--project <PROJECT-KEY>] [--sprint] [--env <env-file>]" >&2
+      exit 1
+    fi
+    SEARCH_QUERY="$1"
+    shift
+    SEARCH_PROJECT=""
+    SEARCH_SPRINT_ONLY=0
+    ENV_FILE="$(dirname "$0")/.env"
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --project) SEARCH_PROJECT="$2"; shift 2 ;;
+        --sprint)  SEARCH_SPRINT_ONLY=1; shift ;;
+        --env)     ENV_FILE="$2"; shift 2 ;;
+        *)
+          echo "ERROR: unrecognized search option '$1'" >&2
+          echo "Usage: $0 search <ISSUE-KEY | \"text to search\"> [--project <PROJECT-KEY>] [--sprint] [--env <env-file>]" >&2
+          exit 1
+          ;;
+      esac
+    done
+    ;;
   *)
-    echo "ERROR: action must be one of comment, description, transition, create, assign, mysprint, field (got '$ACTION')" >&2
+    echo "ERROR: action must be one of comment, description, transition, create, assign, mysprint, field, search (got '$ACTION')" >&2
     exit 1
     ;;
 esac
@@ -265,6 +308,80 @@ if [[ "$ACTION" == "field" ]]; then
   fi
 
   echo "$MATCHES" | sort -t$'\t' -k2
+  exit 0
+fi
+
+if [[ "$ACTION" == "search" ]]; then
+  # A bare issue key (e.g. EAWM-8812) is fetched directly; anything else is
+  # treated as free text for a JQL full-text search.
+  if [[ "$SEARCH_QUERY" =~ ^[A-Za-z][A-Za-z0-9]*-[0-9]+$ ]]; then
+    RESPONSE=$(curl -s -w '\n%{http_code}' \
+      -H "Authorization: Bearer $JIRA_PAT" \
+      "${JIRA_BASE_URL}/rest/api/2/issue/${SEARCH_QUERY}?fields=summary,status,issuetype,assignee,description,comment,customfield_10000")
+
+    HTTP_CODE=$(tail -n1 <<<"$RESPONSE")
+    RESPONSE_BODY=$(sed '$d' <<<"$RESPONSE")
+    unset JIRA_PAT
+
+    if [[ ! "$HTTP_CODE" =~ ^2 ]]; then
+      echo "ERROR: Jira API returned HTTP $HTTP_CODE" >&2
+      echo "$RESPONSE_BODY" >&2
+      exit 1
+    fi
+
+    ISSUES_JSON=$(jq -c '[.]' <<<"$RESPONSE_BODY")
+  else
+    JQL="text ~ \"${SEARCH_QUERY}\""
+    if [[ -n "$SEARCH_PROJECT" ]]; then
+      JQL="project = ${SEARCH_PROJECT} AND ${JQL}"
+    fi
+    if [[ "$SEARCH_SPRINT_ONLY" -eq 1 ]]; then
+      JQL="${JQL} AND sprint in openSprints()"
+    fi
+
+    ENCODED_JQL=$(jq -rn --arg jql "$JQL" '$jql|@uri')
+
+    RESPONSE=$(curl -s -w '\n%{http_code}' \
+      -H "Authorization: Bearer $JIRA_PAT" \
+      "${JIRA_BASE_URL}/rest/api/2/search?jql=${ENCODED_JQL}&fields=summary,status,issuetype,assignee,description,comment,customfield_10000&maxResults=50")
+
+    HTTP_CODE=$(tail -n1 <<<"$RESPONSE")
+    RESPONSE_BODY=$(sed '$d' <<<"$RESPONSE")
+    unset JIRA_PAT
+
+    if [[ ! "$HTTP_CODE" =~ ^2 ]]; then
+      echo "ERROR: Jira API returned HTTP $HTTP_CODE" >&2
+      echo "$RESPONSE_BODY" >&2
+      exit 1
+    fi
+
+    COUNT=$(jq -r '.total' <<<"$RESPONSE_BODY")
+    if [[ "$COUNT" == "0" ]]; then
+      echo "No issues found matching '${SEARCH_QUERY}'${SEARCH_PROJECT:+ in project $SEARCH_PROJECT}${SEARCH_SPRINT_ONLY:+ in an open sprint}."
+      exit 0
+    fi
+
+    ISSUES_JSON=$(jq -c '.issues' <<<"$RESPONSE_BODY")
+  fi
+
+  # customfield_10000 (Sprint) comes back as a greenhopper Sprint object
+  # toString(), same as 'mysprint' - pull id/name/state out with a regex
+  # rather than parsing it as JSON.
+  jq -r --arg base "$JIRA_BASE_URL" '
+    .[] |
+    "Key:         \(.key)\n" +
+    "URL:         \($base)/browse/\(.key)\n" +
+    "Type:        \(.fields.issuetype.name)\n" +
+    "Status:      \(.fields.status.name)\n" +
+    "Assignee:    \(.fields.assignee.displayName // "Unassigned")\n" +
+    "Sprint:      \((.fields.customfield_10000 // ["(none)"])[-1])\n" +
+    "Summary:     \(.fields.summary)\n" +
+    "Description:\n\(.fields.description // "(none)")\n" +
+    (if (.fields.comment.comments | length) > 0 then
+      "Comments:\n" + (.fields.comment.comments | map("  [\(.author.displayName // .author.name)] \(.body)") | join("\n")) + "\n"
+    else "" end) +
+    "----------------------------------------"
+  ' <<<"$ISSUES_JSON" | sed -E 's/^Sprint:.*id=([0-9]+),.*name=([^,]+),.*state=([A-Z]+).*$/Sprint:      id=\1 name=\2 state=\3/'
   exit 0
 fi
 

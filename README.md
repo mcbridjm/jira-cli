@@ -1,4 +1,4 @@
-# jira-issue-update.sh
+# jira-cli.sh
 
 A single, function-agnostic bash script for automating common Jira actions
 against `https://jira.devops.va.gov` (a Jira Server/Data Center instance)
@@ -44,13 +44,13 @@ git-ignored and must never be committed.
 ### Usage
 
 ```bash
-./jira-issue-update.sh comment     <ISSUE-KEY> "<comment text>"                       [env-file]
-./jira-issue-update.sh description <ISSUE-KEY> "<description text>"                  [env-file]
-./jira-issue-update.sh transition  <ISSUE-KEY> "<target status name>"                [env-file]
-./jira-issue-update.sh create      <PROJECT-KEY> "<summary>" "<description>" [--type <issuetype>] [--assignee <username>] [--epic <EPIC-KEY>] [--sprint <sprint-id>] [--env <env-file>]
-./jira-issue-update.sh assign      <ISSUE-KEY> <assignee-username>                   [env-file]
-./jira-issue-update.sh mysprint    [PROJECT-KEY]                                     [env-file]
-./jira-issue-update.sh field       <search-term>                                     [env-file]
+./jira-cli.sh comment     <ISSUE-KEY> "<comment text>"                       [env-file]
+./jira-cli.sh description <ISSUE-KEY> "<description text>"                  [env-file]
+./jira-cli.sh transition  <ISSUE-KEY> "<target status name>"                [env-file]
+./jira-cli.sh create      <PROJECT-KEY> "<summary>" "<description>" [--type <issuetype>] [--assignee <username>] [--epic <EPIC-KEY>] [--sprint <sprint-id>] [--env <env-file>]
+./jira-cli.sh assign      <ISSUE-KEY> <assignee-username>                   [env-file]
+./jira-cli.sh mysprint    [PROJECT-KEY]                                     [env-file]
+./jira-cli.sh field       <search-term>                                     [env-file]
 ```
 
 Running the script with no arguments (or `-h`/`--help`) prints the full
@@ -59,14 +59,14 @@ usage/help text and exits without making any Jira calls.
 ### Examples
 
 ```bash
-./jira-issue-update.sh comment EAWM-7384 "Applied topology spread constraints."
-./jira-issue-update.sh description EAWM-7384 "$(cat new-description.txt)"
-./jira-issue-update.sh transition EAWM-7384 "Resolved"
-./jira-issue-update.sh create EAWM "Promote topology spread constraints to Production" "$(cat followup-desc.txt)" --type Story --assignee adam.schaefer2@va.gov
-./jira-issue-update.sh create EAWM "Research OCR true-up" "$(cat desc.txt)" --epic EAWM-8837 --sprint 52476 --assignee adam.schaefer2@va.gov
-./jira-issue-update.sh assign EAWM-7385 adam.schaefer2@va.gov
-./jira-issue-update.sh mysprint EAWM
-./jira-issue-update.sh field sprint
+./jira-cli.sh comment EAWM-7384 "Applied topology spread constraints."
+./jira-cli.sh description EAWM-7384 "$(cat new-description.txt)"
+./jira-cli.sh transition EAWM-7384 "Resolved"
+./jira-cli.sh create EAWM "Promote topology spread constraints to Production" "$(cat followup-desc.txt)" --type Story --assignee adam.schaefer2@va.gov
+./jira-cli.sh create EAWM "Research OCR true-up" "$(cat desc.txt)" --epic EAWM-8837 --sprint 52476 --assignee adam.schaefer2@va.gov
+./jira-cli.sh assign EAWM-7385 adam.schaefer2@va.gov
+./jira-cli.sh mysprint EAWM
+./jira-cli.sh field sprint
 ```
 
 ## How each action works
