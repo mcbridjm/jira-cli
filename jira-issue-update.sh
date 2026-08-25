@@ -16,6 +16,8 @@
 #                 hop only - see notes below for multi-step workflows)
 #   create      - create a new issue in a project, optionally setting its
 #                 issue type, owner/assignee, Epic Link, and Sprint
+#   clone       - create a new issue by cloning core fields from an
+#                 existing issue, with optional field overrides
 #   assign      - assign an existing issue to a user (by Jira username)
 #   mysprint    - list issues assigned to the PAT owner in any open sprint
 #                 (optionally scoped to one project), printing key, URL,
@@ -31,6 +33,7 @@
 #   ./jira-issue-update.sh description <ISSUE-KEY> "<description text>" [--component <component-name>]... [--label <label>]... [--env <env-file>]
 #   ./jira-issue-update.sh transition  <ISSUE-KEY> "<target status name>"   [env-file]
 #   ./jira-issue-update.sh create      <PROJECT-KEY> "<summary>" "<description>" [--type <issuetype>] [--assignee <username>] [--epic <EPIC-KEY>] [--sprint <sprint-id>] [--component <component-name>]... [--label <label>]... [--env <env-file>]
+#   ./jira-issue-update.sh clone       <SOURCE-ISSUE-KEY> [--project <PROJECT-KEY>] [--summary <summary>] [--description <description>] [--type <issuetype>] [--assignee <username>] [--no-assignee] [--epic <EPIC-KEY>] [--sprint <sprint-id>] [--component <component-name>]... [--label <label>]... [--env <env-file>]
 #   ./jira-issue-update.sh assign      <ISSUE-KEY> <assignee-username>       [env-file]
 #   ./jira-issue-update.sh mysprint    [PROJECT-KEY] [env-file]
 #   ./jira-issue-update.sh field       <search-term> [env-file]
@@ -43,6 +46,8 @@
 #   ./jira-issue-update.sh create EAWM "Promote topology spread constraints to Production" "$(cat followup-desc.txt)" --type Story --assignee adam.schaefer2@va.gov
 #   ./jira-issue-update.sh create EAWM "Research OCR true-up" "$(cat desc.txt)" --epic EAWM-8837 --sprint 52476 --assignee adam.schaefer2@va.gov
 #   ./jira-issue-update.sh create EAWM "Release objective" "$(cat desc.txt)" --type Initiative --component FY27Q1 --label committed
+#   ./jira-issue-update.sh clone EAWM-7384 --summary "Follow-up: topology spread constraints"
+#   ./jira-issue-update.sh clone EAWM-7384 --project EAWM --type Story --component FY27Q1 --label committed --no-assignee
 #   ./jira-issue-update.sh assign EAWM-7385 adam.schaefer2@va.gov
 #   ./jira-issue-update.sh mysprint EAWM
 #   ./jira-issue-update.sh field sprint
@@ -81,7 +86,7 @@
 set -euo pipefail
 
 if [[ $# -lt 1 ]]; then
-  echo "Usage: $0 <comment|description|transition|create|assign|mysprint|field> ..." >&2
+  echo "Usage: $0 <comment|description|transition|create|clone|assign|mysprint|field> ..." >&2
   echo "Run with -h for full usage." >&2
   exit 1
 fi
@@ -183,6 +188,55 @@ case "$ACTION" in
       esac
     done
     ;;
+  clone)
+    if [[ $# -lt 1 ]]; then
+      echo "Usage: $0 clone <SOURCE-ISSUE-KEY> [--project <PROJECT-KEY>] [--summary <summary>] [--description <description>] [--type <issuetype>] [--assignee <username>] [--no-assignee] [--epic <EPIC-KEY>] [--sprint <sprint-id>] [--component <component-name>]... [--label <label>]... [--env <env-file>]" >&2
+      exit 1
+    fi
+    SOURCE_ISSUE_KEY="$1"
+    shift
+    CLONE_PROJECT_KEY=""
+    CLONE_SUMMARY=""
+    CLONE_DESCRIPTION=""
+    CLONE_ISSUETYPE=""
+    CLONE_ASSIGNEE=""
+    CLONE_NO_ASSIGNEE=0
+    CLONE_EPIC_LINK=""
+    CLONE_SPRINT_ID=""
+    CLONE_COMPONENTS_JSON='[]'
+    CLONE_LABELS_JSON='[]'
+    CLONE_COMPONENTS_OVERRIDE=0
+    CLONE_LABELS_OVERRIDE=0
+    ENV_FILE="$(dirname "$0")/.env"
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --project) CLONE_PROJECT_KEY="$2"; shift 2 ;;
+        --summary) CLONE_SUMMARY="$2"; shift 2 ;;
+        --description) CLONE_DESCRIPTION="$2"; shift 2 ;;
+        --type) CLONE_ISSUETYPE="$2"; shift 2 ;;
+        --assignee) CLONE_ASSIGNEE="$2"; shift 2 ;;
+        --no-assignee) CLONE_NO_ASSIGNEE=1; shift ;;
+        --epic) CLONE_EPIC_LINK="$2"; shift 2 ;;
+        --sprint) CLONE_SPRINT_ID="$2"; shift 2 ;;
+        --component)
+          CLONE_COMPONENTS_OVERRIDE=1
+          CLONE_COMPONENTS_JSON=$(jq -cn --argjson a "$CLONE_COMPONENTS_JSON" --arg v "$2" '$a + [{name:$v}]')
+          shift 2
+          ;;
+        --label)
+          CLONE_LABELS_OVERRIDE=1
+          CLONE_LABELS_JSON=$(jq -cn --argjson a "$CLONE_LABELS_JSON" --arg v "$2" '$a + [$v]')
+          shift 2
+          ;;
+        --env) ENV_FILE="$2"; shift 2 ;;
+        *)
+          echo "ERROR: unrecognized clone option '$1'" >&2
+          echo "Usage: $0 clone <SOURCE-ISSUE-KEY> [--project <PROJECT-KEY>] [--summary <summary>] [--description <description>] [--type <issuetype>] [--assignee <username>] [--no-assignee] [--epic <EPIC-KEY>] [--sprint <sprint-id>] [--component <component-name>]... [--label <label>]... [--env <env-file>]" >&2
+          exit 1
+          ;;
+      esac
+    done
+    ;;
   assign)
     if [[ $# -lt 2 ]]; then
       echo "Usage: $0 assign <ISSUE-KEY> <assignee-username> [env-file]" >&2
@@ -214,7 +268,7 @@ case "$ACTION" in
     ENV_FILE="${2:-$(dirname "$0")/.env}"
     ;;
   *)
-    echo "ERROR: action must be one of comment, description, transition, create, assign, mysprint, field (got '$ACTION')" >&2
+    echo "ERROR: action must be one of comment, description, transition, create, clone, assign, mysprint, field (got '$ACTION')" >&2
     exit 1
     ;;
 esac
@@ -379,6 +433,75 @@ case "$ACTION" in
     URL="${JIRA_BASE_URL}/rest/api/2/issue"
     METHOD="POST"
     ;;
+  clone)
+    SOURCE_RESPONSE=$(curl -s -w '\n%{http_code}' \
+      -H "Authorization: Bearer ${JIRA_PAT}" \
+      "${JIRA_BASE_URL}/rest/api/2/issue/${SOURCE_ISSUE_KEY}?fields=project,issuetype,summary,description,assignee,components,labels,customfield_10001")
+
+    SOURCE_HTTP_CODE=$(tail -n1 <<<"$SOURCE_RESPONSE")
+    SOURCE_BODY=$(sed '$d' <<<"$SOURCE_RESPONSE")
+
+    if [[ ! "$SOURCE_HTTP_CODE" =~ ^2 ]]; then
+      echo "ERROR: failed to read source issue '$SOURCE_ISSUE_KEY' (HTTP $SOURCE_HTTP_CODE)" >&2
+      echo "$SOURCE_BODY" >&2
+      unset JIRA_PAT
+      exit 1
+    fi
+
+    SRC_PROJECT_KEY=$(jq -r '.fields.project.key // empty' <<<"$SOURCE_BODY")
+    SRC_ISSUETYPE=$(jq -r '.fields.issuetype.name // empty' <<<"$SOURCE_BODY")
+    SRC_SUMMARY=$(jq -r '.fields.summary // empty' <<<"$SOURCE_BODY")
+    SRC_DESCRIPTION=$(jq -r '.fields.description // empty' <<<"$SOURCE_BODY")
+    SRC_ASSIGNEE=$(jq -r '.fields.assignee.name // empty' <<<"$SOURCE_BODY")
+    SRC_EPIC_LINK=$(jq -r '.fields.customfield_10001 // empty' <<<"$SOURCE_BODY")
+    SRC_COMPONENTS_JSON=$(jq -c '[.fields.components[]? | {name: .name}]' <<<"$SOURCE_BODY")
+    SRC_LABELS_JSON=$(jq -c '[.fields.labels[]?]' <<<"$SOURCE_BODY")
+
+    FINAL_PROJECT_KEY="${CLONE_PROJECT_KEY:-$SRC_PROJECT_KEY}"
+    FINAL_ISSUETYPE="${CLONE_ISSUETYPE:-$SRC_ISSUETYPE}"
+    FINAL_SUMMARY="${CLONE_SUMMARY:-$SRC_SUMMARY}"
+    FINAL_DESCRIPTION="${CLONE_DESCRIPTION:-$SRC_DESCRIPTION}"
+    FINAL_EPIC_LINK="${CLONE_EPIC_LINK:-$SRC_EPIC_LINK}"
+
+    if [[ "$CLONE_NO_ASSIGNEE" -eq 1 ]]; then
+      FINAL_ASSIGNEE=""
+    elif [[ -n "$CLONE_ASSIGNEE" ]]; then
+      FINAL_ASSIGNEE="$CLONE_ASSIGNEE"
+    else
+      FINAL_ASSIGNEE="$SRC_ASSIGNEE"
+    fi
+
+    if [[ "$CLONE_COMPONENTS_OVERRIDE" -eq 1 ]]; then
+      FINAL_COMPONENTS_JSON="$CLONE_COMPONENTS_JSON"
+    else
+      FINAL_COMPONENTS_JSON="$SRC_COMPONENTS_JSON"
+    fi
+
+    if [[ "$CLONE_LABELS_OVERRIDE" -eq 1 ]]; then
+      FINAL_LABELS_JSON="$CLONE_LABELS_JSON"
+    else
+      FINAL_LABELS_JSON="$SRC_LABELS_JSON"
+    fi
+
+    BODY_JSON=$(jq -n \
+      --arg project "$FINAL_PROJECT_KEY" \
+      --arg issuetype "$FINAL_ISSUETYPE" \
+      --arg summary "$FINAL_SUMMARY" \
+      --arg description "$FINAL_DESCRIPTION" \
+      --arg assignee "$FINAL_ASSIGNEE" \
+      --arg epic "$FINAL_EPIC_LINK" \
+      --arg sprint "$CLONE_SPRINT_ID" \
+      --argjson components "$FINAL_COMPONENTS_JSON" \
+      --argjson labels "$FINAL_LABELS_JSON" \
+      '{fields: ({project: {key: $project}, issuetype: {name: $issuetype}, summary: $summary, description: $description}
+        + (if $assignee != "" then {assignee: {name: $assignee}} else {} end)
+        + (if $epic != "" then {customfield_10001: $epic} else {} end)
+        + (if $sprint != "" then {customfield_10000: ($sprint | tonumber)} else {} end)
+        + (if ($components | length) > 0 then {components: $components} else {} end)
+        + (if ($labels | length) > 0 then {labels: $labels} else {} end))}')
+    URL="${JIRA_BASE_URL}/rest/api/2/issue"
+    METHOD="POST"
+    ;;
   assign)
     BODY_JSON=$(jq -n --arg name "$ASSIGNEE" '{name: $name}')
     URL="${JIRA_BASE_URL}/rest/api/2/issue/${ISSUE_KEY}/assignee"
@@ -401,9 +524,11 @@ unset JIRA_PAT
 
 if [[ "$HTTP_CODE" =~ ^2 ]]; then
   case "$ACTION" in
-    create)
+    create|clone)
       NEW_KEY=$(jq -r '.key // empty' <<<"$RESPONSE_BODY")
-      if [[ -n "$ASSIGNEE" ]]; then
+      if [[ "$ACTION" == "clone" ]]; then
+        echo "Issue cloned successfully: ${SOURCE_ISSUE_KEY} -> ${NEW_KEY} (HTTP $HTTP_CODE)."
+      elif [[ -n "$ASSIGNEE" ]]; then
         echo "Issue created successfully: ${NEW_KEY}, assigned to ${ASSIGNEE} (HTTP $HTTP_CODE)"
       else
         echo "Issue created successfully: ${NEW_KEY} (HTTP $HTTP_CODE)"
