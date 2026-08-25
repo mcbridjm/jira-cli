@@ -10,7 +10,8 @@
 #
 # Actions:
 #   comment     - add a comment to an existing issue
-#   description - replace an existing issue's description
+#   description - replace an existing issue's description, optionally
+#                 updating components and labels in the same call
 #   transition  - move an existing issue to a new status (single workflow
 #                 hop only - see notes below for multi-step workflows)
 #   create      - create a new issue in a project, optionally setting its
@@ -27,9 +28,9 @@
 #
 # Usage:
 #   ./jira-issue-update.sh comment     <ISSUE-KEY> "<comment text>"          [env-file]
-#   ./jira-issue-update.sh description <ISSUE-KEY> "<description text>"     [env-file]
+#   ./jira-issue-update.sh description <ISSUE-KEY> "<description text>" [--component <component-name>]... [--label <label>]... [--env <env-file>]
 #   ./jira-issue-update.sh transition  <ISSUE-KEY> "<target status name>"   [env-file]
-#   ./jira-issue-update.sh create      <PROJECT-KEY> "<summary>" "<description>" [--type <issuetype>] [--assignee <username>] [--epic <EPIC-KEY>] [--sprint <sprint-id>] [--env <env-file>]
+#   ./jira-issue-update.sh create      <PROJECT-KEY> "<summary>" "<description>" [--type <issuetype>] [--assignee <username>] [--epic <EPIC-KEY>] [--sprint <sprint-id>] [--component <component-name>]... [--label <label>]... [--env <env-file>]
 #   ./jira-issue-update.sh assign      <ISSUE-KEY> <assignee-username>       [env-file]
 #   ./jira-issue-update.sh mysprint    [PROJECT-KEY] [env-file]
 #   ./jira-issue-update.sh field       <search-term> [env-file]
@@ -37,9 +38,11 @@
 # Examples:
 #   ./jira-issue-update.sh comment EAWM-7384 "Applied topology spread constraints."
 #   ./jira-issue-update.sh description EAWM-7384 "$(cat new-description.txt)"
+#   ./jira-issue-update.sh description EAWM-7384 "$(cat new-description.txt)" --component FY27Q1 --label committed
 #   ./jira-issue-update.sh transition EAWM-7384 "Resolved"
 #   ./jira-issue-update.sh create EAWM "Promote topology spread constraints to Production" "$(cat followup-desc.txt)" --type Story --assignee adam.schaefer2@va.gov
 #   ./jira-issue-update.sh create EAWM "Research OCR true-up" "$(cat desc.txt)" --epic EAWM-8837 --sprint 52476 --assignee adam.schaefer2@va.gov
+#   ./jira-issue-update.sh create EAWM "Release objective" "$(cat desc.txt)" --type Initiative --component FY27Q1 --label committed
 #   ./jira-issue-update.sh assign EAWM-7385 adam.schaefer2@va.gov
 #   ./jira-issue-update.sh mysprint EAWM
 #   ./jira-issue-update.sh field sprint
@@ -93,7 +96,46 @@ shift
 JIRA_BASE_URL="https://jira.devops.va.gov"
 
 case "$ACTION" in
-  comment|description|transition)
+  description)
+    if [[ $# -lt 2 ]]; then
+      echo "Usage: $0 description <ISSUE-KEY> \"<description text>\" [--component <component-name>]... [--label <label>]... [--env <env-file>]" >&2
+      exit 1
+    fi
+    ISSUE_KEY="$1"
+    TEXT="$2"
+    shift 2
+    DESCRIPTION_COMPONENTS_JSON='[]'
+    DESCRIPTION_LABELS_JSON='[]'
+    ENV_FILE="$(dirname "$0")/.env"
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --component)
+          DESCRIPTION_COMPONENTS_JSON=$(jq -cn --argjson a "$DESCRIPTION_COMPONENTS_JSON" --arg v "$2" '$a + [{name:$v}]')
+          shift 2
+          ;;
+        --label)
+          DESCRIPTION_LABELS_JSON=$(jq -cn --argjson a "$DESCRIPTION_LABELS_JSON" --arg v "$2" '$a + [$v]')
+          shift 2
+          ;;
+        --env)
+          ENV_FILE="$2"
+          shift 2
+          ;;
+        *)
+          # Backward compatibility: allow trailing positional env file.
+          if [[ $# -eq 1 && "$1" != --* ]]; then
+            ENV_FILE="$1"
+            shift
+          else
+            echo "ERROR: unrecognized description option '$1'" >&2
+            echo "Usage: $0 description <ISSUE-KEY> \"<description text>\" [--component <component-name>]... [--label <label>]... [--env <env-file>]" >&2
+            exit 1
+          fi
+          ;;
+      esac
+    done
+    ;;
+  comment|transition)
     if [[ $# -lt 2 ]]; then
       echo "Usage: $0 $ACTION <ISSUE-KEY> \"<text>\" [env-file]" >&2
       exit 1
@@ -104,7 +146,7 @@ case "$ACTION" in
     ;;
   create)
     if [[ $# -lt 3 ]]; then
-      echo "Usage: $0 create <PROJECT-KEY> \"<summary>\" \"<description>\" [--type <issuetype>] [--assignee <username>] [--epic <EPIC-KEY>] [--sprint <sprint-id>] [--env <env-file>]" >&2
+      echo "Usage: $0 create <PROJECT-KEY> \"<summary>\" \"<description>\" [--type <issuetype>] [--assignee <username>] [--epic <EPIC-KEY>] [--sprint <sprint-id>] [--component <component-name>]... [--label <label>]... [--env <env-file>]" >&2
       exit 1
     fi
     PROJECT_KEY="$1"
@@ -115,6 +157,8 @@ case "$ACTION" in
     ASSIGNEE=""
     EPIC_LINK=""
     SPRINT_ID=""
+    CREATE_COMPONENTS_JSON='[]'
+    CREATE_LABELS_JSON='[]'
     ENV_FILE="$(dirname "$0")/.env"
     while [[ $# -gt 0 ]]; do
       case "$1" in
@@ -122,10 +166,18 @@ case "$ACTION" in
         --assignee) ASSIGNEE="$2"; shift 2 ;;
         --epic)     EPIC_LINK="$2"; shift 2 ;;
         --sprint)   SPRINT_ID="$2"; shift 2 ;;
+        --component)
+          CREATE_COMPONENTS_JSON=$(jq -cn --argjson a "$CREATE_COMPONENTS_JSON" --arg v "$2" '$a + [{name:$v}]')
+          shift 2
+          ;;
+        --label)
+          CREATE_LABELS_JSON=$(jq -cn --argjson a "$CREATE_LABELS_JSON" --arg v "$2" '$a + [$v]')
+          shift 2
+          ;;
         --env)      ENV_FILE="$2"; shift 2 ;;
         *)
           echo "ERROR: unrecognized create option '$1'" >&2
-          echo "Usage: $0 create <PROJECT-KEY> \"<summary>\" \"<description>\" [--type <issuetype>] [--assignee <username>] [--epic <EPIC-KEY>] [--sprint <sprint-id>] [--env <env-file>]" >&2
+          echo "Usage: $0 create <PROJECT-KEY> \"<summary>\" \"<description>\" [--type <issuetype>] [--assignee <username>] [--epic <EPIC-KEY>] [--sprint <sprint-id>] [--component <component-name>]... [--label <label>]... [--env <env-file>]" >&2
           exit 1
           ;;
       esac
@@ -275,7 +327,13 @@ case "$ACTION" in
     METHOD="POST"
     ;;
   description)
-    BODY_JSON=$(jq -n --arg desc "$TEXT" '{fields: {description: $desc}}')
+    BODY_JSON=$(jq -n \
+      --arg desc "$TEXT" \
+      --argjson components "$DESCRIPTION_COMPONENTS_JSON" \
+      --argjson labels "$DESCRIPTION_LABELS_JSON" \
+      '{fields: ({description: $desc}
+        + (if ($components | length) > 0 then {components: $components} else {} end)
+        + (if ($labels | length) > 0 then {labels: $labels} else {} end))}')
     URL="${JIRA_BASE_URL}/rest/api/2/issue/${ISSUE_KEY}"
     METHOD="PUT"
     ;;
@@ -310,10 +368,14 @@ case "$ACTION" in
       --arg assignee "$ASSIGNEE" \
       --arg epic "$EPIC_LINK" \
       --arg sprint "$SPRINT_ID" \
+      --argjson components "$CREATE_COMPONENTS_JSON" \
+      --argjson labels "$CREATE_LABELS_JSON" \
       '{fields: ({project: {key: $project}, issuetype: {name: $issuetype}, summary: $summary, description: $description}
         + (if $assignee != "" then {assignee: {name: $assignee}} else {} end)
         + (if $epic != "" then {customfield_10001: $epic} else {} end)
-        + (if $sprint != "" then {customfield_10000: ($sprint | tonumber)} else {} end))}')
+        + (if $sprint != "" then {customfield_10000: ($sprint | tonumber)} else {} end)
+        + (if ($components | length) > 0 then {components: $components} else {} end)
+        + (if ($labels | length) > 0 then {labels: $labels} else {} end))}')
     URL="${JIRA_BASE_URL}/rest/api/2/issue"
     METHOD="POST"
     ;;
