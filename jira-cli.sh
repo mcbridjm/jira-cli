@@ -28,13 +28,13 @@
 #                 print the FULL content (summary, status, type, assignee,
 #                 sprint, full description, comments) of each match -
 #                 optionally scoped to a project and/or the open sprint
-#   recentactivity - list issues where a given user (default: the PAT
-#                 owner, or a specific Jira username via --user) changed
-#                 the status within the last N days (default 7),
-#                 optionally scoped to one project - prints key, URL, full
-#                 description, and the most recent status transition
-#                 (from/to + date) made by that user, for building
-#                 status-report summaries
+#   recentactivity - list issues owned by (assigned to) a given user
+#                 (default: the PAT owner, or a specific Jira username via
+#                 --user) where that same user changed the status within
+#                 the last N days (default 7), optionally scoped to one
+#                 project - prints key, URL, full description, and the
+#                 most recent status transition (from/to + date) made by
+#                 that user, for building status-report summaries
 #
 # Usage:
 #   ./jira-cli.sh comment     <ISSUE-KEY> "<comment text>"          [env-file]
@@ -104,8 +104,9 @@
 #   exits non-zero without changing anything.
 #
 # Notes on 'recentactivity':
-#   Runs the JQL `status changed by <user> after -<N>d` (default N=7,
-#   optionally narrowed with `--project <PROJECT-KEY>`) with
+#   Runs the JQL `assignee = <user> AND status changed by <user> after
+#   -<N>d` (default N=7, optionally narrowed with `--project
+#   <PROJECT-KEY>`) with
 #   `expand=changelog` to fetch each matching issue's full changelog. By
 #   default <user> is `currentUser()` (the PAT owner, identified via GET
 #   /rest/api/2/myself); pass `--user <jira-username>` to report on any
@@ -458,7 +459,10 @@ if [[ "$ACTION" == "recentactivity" ]]; then
     JQL_USER="currentUser()"
   fi
 
-  JQL="status changed by ${JQL_USER} after -${RECENT_DAYS}d"
+  # Restrict to issues currently owned (assigned) by the same person who
+  # made the status change - excludes stories worked/transitioned on
+  # someone else's behalf.
+  JQL="assignee = ${JQL_USER} AND status changed by ${JQL_USER} after -${RECENT_DAYS}d"
   if [[ -n "$RECENT_PROJECT" ]]; then
     JQL="project = ${RECENT_PROJECT} AND ${JQL}"
   fi
@@ -481,7 +485,7 @@ if [[ "$ACTION" == "recentactivity" ]]; then
 
   COUNT=$(jq -r '.total' <<<"$RESPONSE_BODY")
   if [[ "$COUNT" == "0" ]]; then
-    echo "No issues where ${RECENT_USER:-you} changed status in the last ${RECENT_DAYS} day(s)${RECENT_PROJECT:+ for project $RECENT_PROJECT}."
+    echo "No issues owned by and status-changed by ${RECENT_USER:-you} in the last ${RECENT_DAYS} day(s)${RECENT_PROJECT:+ for project $RECENT_PROJECT}."
     exit 0
   fi
 
