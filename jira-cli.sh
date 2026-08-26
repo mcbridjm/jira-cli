@@ -28,11 +28,13 @@
 #                 print the FULL content (summary, status, type, assignee,
 #                 sprint, full description, comments) of each match -
 #                 optionally scoped to a project and/or the open sprint
-#   recentactivity - list issues where the PAT owner changed the status
-#                 within the last N days (default 7), optionally scoped to
-#                 one project - prints key, URL, full description, and the
-#                 most recent status transition (from/to + date) made by
-#                 the PAT owner, for building status-report summaries
+#   recentactivity - list issues where a given user (default: the PAT
+#                 owner, or a specific Jira username via --user) changed
+#                 the status within the last N days (default 7),
+#                 optionally scoped to one project - prints key, URL, full
+#                 description, and the most recent status transition
+#                 (from/to + date) made by that user, for building
+#                 status-report summaries
 #
 # Usage:
 #   ./jira-cli.sh comment     <ISSUE-KEY> "<comment text>"          [env-file]
@@ -43,7 +45,7 @@
 #   ./jira-cli.sh mysprint    [PROJECT-KEY] [env-file]
 #   ./jira-cli.sh field       <search-term> [env-file]
 #   ./jira-cli.sh search      <ISSUE-KEY | "text to search">  [--project <PROJECT-KEY>] [--sprint] [--env <env-file>]
-#   ./jira-cli.sh recentactivity [--days <n>] [--project <PROJECT-KEY>] [--env <env-file>]
+#   ./jira-cli.sh recentactivity [--days <n>] [--project <PROJECT-KEY>] [--user <jira-username>] [--env <env-file>]
 #
 # Examples:
 #   ./jira-cli.sh comment EAWM-7384 "Applied topology spread constraints."
@@ -58,6 +60,7 @@
 #   ./jira-cli.sh search "Account Re-use" --project EAWM --sprint
 #   ./jira-cli.sh recentactivity
 #   ./jira-cli.sh recentactivity --days 14 --project EAWM
+#   ./jira-cli.sh recentactivity --user macklin.mcbride@va.gov --days 7
 #
 # Notes on 'assign' / create's --assignee (the issue "owner"):
 #   The assignee value must be the Jira account's "name" (username), which
@@ -101,11 +104,15 @@
 #   exits non-zero without changing anything.
 #
 # Notes on 'recentactivity':
-#   Runs the JQL `status changed by currentUser() after -<N>d` (default
-#   N=7, optionally narrowed with `--project <PROJECT-KEY>`) with
-#   `expand=changelog` to fetch each matching issue's full changelog. For
-#   each issue, the changelog is scanned for 'status' field history entries
-#   authored by the PAT owner (identified via GET /rest/api/2/myself) whose
+#   Runs the JQL `status changed by <user> after -<N>d` (default N=7,
+#   optionally narrowed with `--project <PROJECT-KEY>`) with
+#   `expand=changelog` to fetch each matching issue's full changelog. By
+#   default <user> is `currentUser()` (the PAT owner, identified via GET
+#   /rest/api/2/myself); pass `--user <jira-username>` to report on any
+#   other Jira user's status changes instead (their Jira "name"/login,
+#   e.g. an email address on this instance - see the assign/--assignee
+#   notes above for how to look that up). For each issue, the changelog is
+#   scanned for 'status' field history entries authored by that user whose
 #   timestamp falls within the last N days; the most recent such entry's
 #   from/to status and date are printed alongside the key, URL, and full
 #   description - the from/to + date are what changed, the description is
@@ -226,15 +233,17 @@ case "$ACTION" in
   recentactivity)
     RECENT_DAYS=7
     RECENT_PROJECT=""
+    RECENT_USER=""
     ENV_FILE="$(dirname "$0")/.env"
     while [[ $# -gt 0 ]]; do
       case "$1" in
         --days)    RECENT_DAYS="$2"; shift 2 ;;
         --project) RECENT_PROJECT="$2"; shift 2 ;;
+        --user)    RECENT_USER="$2"; shift 2 ;;
         --env)     ENV_FILE="$2"; shift 2 ;;
         *)
           echo "ERROR: unrecognized recentactivity option '$1'" >&2
-          echo "Usage: $0 recentactivity [--days <n>] [--project <PROJECT-KEY>] [--env <env-file>]" >&2
+          echo "Usage: $0 recentactivity [--days <n>] [--project <PROJECT-KEY>] [--user <jira-username>] [--env <env-file>]" >&2
           exit 1
           ;;
       esac
@@ -422,25 +431,34 @@ if [[ "$ACTION" == "search" ]]; then
 fi
 
 if [[ "$ACTION" == "recentactivity" ]]; then
-  # Identify the PAT owner so status changes made by other people on the
-  # same issue can be filtered out below.
-  ME_RESPONSE=$(curl -s -w '\n%{http_code}' \
-    -H "Authorization: Bearer ${JIRA_PAT}" \
-    "${JIRA_BASE_URL}/rest/api/2/myself")
+  if [[ -n "$RECENT_USER" ]]; then
+    # A specific username was requested; use it directly for both the JQL
+    # and changelog-author filter (no need to resolve the PAT owner).
+    MY_NAME="$RECENT_USER"
+    JQL_USER="\"${RECENT_USER}\""
+  else
+    # Default to the PAT owner: identify them via /myself so status
+    # changes made by other people on the same issue can be filtered out
+    # below.
+    ME_RESPONSE=$(curl -s -w '\n%{http_code}' \
+      -H "Authorization: Bearer ${JIRA_PAT}" \
+      "${JIRA_BASE_URL}/rest/api/2/myself")
 
-  ME_HTTP_CODE=$(tail -n1 <<<"$ME_RESPONSE")
-  ME_BODY=$(sed '$d' <<<"$ME_RESPONSE")
+    ME_HTTP_CODE=$(tail -n1 <<<"$ME_RESPONSE")
+    ME_BODY=$(sed '$d' <<<"$ME_RESPONSE")
 
-  if [[ ! "$ME_HTTP_CODE" =~ ^2 ]]; then
-    unset JIRA_PAT
-    echo "ERROR: Jira API returned HTTP $ME_HTTP_CODE (fetching current user)" >&2
-    echo "$ME_BODY" >&2
-    exit 1
+    if [[ ! "$ME_HTTP_CODE" =~ ^2 ]]; then
+      unset JIRA_PAT
+      echo "ERROR: Jira API returned HTTP $ME_HTTP_CODE (fetching current user)" >&2
+      echo "$ME_BODY" >&2
+      exit 1
+    fi
+
+    MY_NAME=$(jq -r '.name' <<<"$ME_BODY")
+    JQL_USER="currentUser()"
   fi
 
-  MY_NAME=$(jq -r '.name' <<<"$ME_BODY")
-
-  JQL="status changed by currentUser() after -${RECENT_DAYS}d"
+  JQL="status changed by ${JQL_USER} after -${RECENT_DAYS}d"
   if [[ -n "$RECENT_PROJECT" ]]; then
     JQL="project = ${RECENT_PROJECT} AND ${JQL}"
   fi
@@ -463,13 +481,13 @@ if [[ "$ACTION" == "recentactivity" ]]; then
 
   COUNT=$(jq -r '.total' <<<"$RESPONSE_BODY")
   if [[ "$COUNT" == "0" ]]; then
-    echo "No issues where you changed status in the last ${RECENT_DAYS} day(s)${RECENT_PROJECT:+ for project $RECENT_PROJECT}."
+    echo "No issues where ${RECENT_USER:-you} changed status in the last ${RECENT_DAYS} day(s)${RECENT_PROJECT:+ for project $RECENT_PROJECT}."
     exit 0
   fi
 
   # For each issue, scan changelog histories for 'status' field changes
-  # authored by the PAT owner within the requested window, and keep only
-  # the most recent one (an issue may have several matching hops).
+  # authored by the target user within the requested window, and keep
+  # only the most recent one (an issue may have several matching hops).
   jq -r --arg base "$JIRA_BASE_URL" --arg me "$MY_NAME" --argjson days "$RECENT_DAYS" '
     (now - ($days * 86400)) as $cutoff |
     .issues[] |
