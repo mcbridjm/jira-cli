@@ -28,6 +28,11 @@
 #                 print the FULL content (summary, status, type, assignee,
 #                 sprint, full description, comments) of each match -
 #                 optionally scoped to a project and/or the open sprint
+#   recentactivity - list issues where the PAT owner changed the status
+#                 within the last N days (default 7), optionally scoped to
+#                 one project - prints key, URL, full description, and the
+#                 most recent status transition (from/to + date) made by
+#                 the PAT owner, for building status-report summaries
 #
 # Usage:
 #   ./jira-cli.sh comment     <ISSUE-KEY> "<comment text>"          [env-file]
@@ -38,6 +43,7 @@
 #   ./jira-cli.sh mysprint    [PROJECT-KEY] [env-file]
 #   ./jira-cli.sh field       <search-term> [env-file]
 #   ./jira-cli.sh search      <ISSUE-KEY | "text to search">  [--project <PROJECT-KEY>] [--sprint] [--env <env-file>]
+#   ./jira-cli.sh recentactivity [--days <n>] [--project <PROJECT-KEY>] [--env <env-file>]
 #
 # Examples:
 #   ./jira-cli.sh comment EAWM-7384 "Applied topology spread constraints."
@@ -50,6 +56,8 @@
 #   ./jira-cli.sh field sprint
 #   ./jira-cli.sh search EAWM-8812
 #   ./jira-cli.sh search "Account Re-use" --project EAWM --sprint
+#   ./jira-cli.sh recentactivity
+#   ./jira-cli.sh recentactivity --days 14 --project EAWM
 #
 # Notes on 'assign' / create's --assignee (the issue "owner"):
 #   The assignee value must be the Jira account's "name" (username), which
@@ -92,13 +100,24 @@
 #   transitions from the current status so you know what to run next, and
 #   exits non-zero without changing anything.
 #
+# Notes on 'recentactivity':
+#   Runs the JQL `status changed by currentUser() after -<N>d` (default
+#   N=7, optionally narrowed with `--project <PROJECT-KEY>`) with
+#   `expand=changelog` to fetch each matching issue's full changelog. For
+#   each issue, the changelog is scanned for 'status' field history entries
+#   authored by the PAT owner (identified via GET /rest/api/2/myself) whose
+#   timestamp falls within the last N days; the most recent such entry's
+#   from/to status and date are printed alongside the key, URL, and full
+#   description - the from/to + date are what changed, the description is
+#   the raw material for writing a synopsis.
+#
 # The .env file (default: ./.env, next to this script) must define:
 #   PAT=<your jira personal access token>
 #
 set -euo pipefail
 
 if [[ $# -lt 1 ]]; then
-  echo "Usage: $0 <comment|description|transition|create|assign|mysprint|field|search> ..." >&2
+  echo "Usage: $0 <comment|description|transition|create|assign|mysprint|field|search|recentactivity> ..." >&2
   echo "Run with -h for full usage." >&2
   exit 1
 fi
@@ -204,8 +223,25 @@ case "$ACTION" in
       esac
     done
     ;;
+  recentactivity)
+    RECENT_DAYS=7
+    RECENT_PROJECT=""
+    ENV_FILE="$(dirname "$0")/.env"
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --days)    RECENT_DAYS="$2"; shift 2 ;;
+        --project) RECENT_PROJECT="$2"; shift 2 ;;
+        --env)     ENV_FILE="$2"; shift 2 ;;
+        *)
+          echo "ERROR: unrecognized recentactivity option '$1'" >&2
+          echo "Usage: $0 recentactivity [--days <n>] [--project <PROJECT-KEY>] [--env <env-file>]" >&2
+          exit 1
+          ;;
+      esac
+    done
+    ;;
   *)
-    echo "ERROR: action must be one of comment, description, transition, create, assign, mysprint, field, search (got '$ACTION')" >&2
+    echo "ERROR: action must be one of comment, description, transition, create, assign, mysprint, field, search, recentactivity (got '$ACTION')" >&2
     exit 1
     ;;
 esac
@@ -382,6 +418,80 @@ if [[ "$ACTION" == "search" ]]; then
     else "" end) +
     "----------------------------------------"
   ' <<<"$ISSUES_JSON" | sed -E 's/^Sprint:.*id=([0-9]+),.*name=([^,]+),.*state=([A-Z]+).*$/Sprint:      id=\1 name=\2 state=\3/'
+  exit 0
+fi
+
+if [[ "$ACTION" == "recentactivity" ]]; then
+  # Identify the PAT owner so status changes made by other people on the
+  # same issue can be filtered out below.
+  ME_RESPONSE=$(curl -s -w '\n%{http_code}' \
+    -H "Authorization: Bearer ${JIRA_PAT}" \
+    "${JIRA_BASE_URL}/rest/api/2/myself")
+
+  ME_HTTP_CODE=$(tail -n1 <<<"$ME_RESPONSE")
+  ME_BODY=$(sed '$d' <<<"$ME_RESPONSE")
+
+  if [[ ! "$ME_HTTP_CODE" =~ ^2 ]]; then
+    unset JIRA_PAT
+    echo "ERROR: Jira API returned HTTP $ME_HTTP_CODE (fetching current user)" >&2
+    echo "$ME_BODY" >&2
+    exit 1
+  fi
+
+  MY_NAME=$(jq -r '.name' <<<"$ME_BODY")
+
+  JQL="status changed by currentUser() after -${RECENT_DAYS}d"
+  if [[ -n "$RECENT_PROJECT" ]]; then
+    JQL="project = ${RECENT_PROJECT} AND ${JQL}"
+  fi
+
+  ENCODED_JQL=$(jq -rn --arg jql "$JQL" '$jql|@uri')
+
+  RESPONSE=$(curl -s -w '\n%{http_code}' \
+    -H "Authorization: Bearer ${JIRA_PAT}" \
+    "${JIRA_BASE_URL}/rest/api/2/search?jql=${ENCODED_JQL}&fields=summary,status,description&expand=changelog&maxResults=100")
+
+  HTTP_CODE=$(tail -n1 <<<"$RESPONSE")
+  RESPONSE_BODY=$(sed '$d' <<<"$RESPONSE")
+  unset JIRA_PAT
+
+  if [[ ! "$HTTP_CODE" =~ ^2 ]]; then
+    echo "ERROR: Jira API returned HTTP $HTTP_CODE" >&2
+    echo "$RESPONSE_BODY" >&2
+    exit 1
+  fi
+
+  COUNT=$(jq -r '.total' <<<"$RESPONSE_BODY")
+  if [[ "$COUNT" == "0" ]]; then
+    echo "No issues where you changed status in the last ${RECENT_DAYS} day(s)${RECENT_PROJECT:+ for project $RECENT_PROJECT}."
+    exit 0
+  fi
+
+  # For each issue, scan changelog histories for 'status' field changes
+  # authored by the PAT owner within the requested window, and keep only
+  # the most recent one (an issue may have several matching hops).
+  jq -r --arg base "$JIRA_BASE_URL" --arg me "$MY_NAME" --argjson days "$RECENT_DAYS" '
+    (now - ($days * 86400)) as $cutoff |
+    .issues[] |
+    (.changelog.histories // []) as $histories |
+    ([
+      $histories[] |
+      select(.author.name == $me) |
+      . as $h |
+      ($h.created | sub("\\.[0-9]+"; "") | strptime("%Y-%m-%dT%H:%M:%S%z") | mktime) as $ts |
+      select($ts >= $cutoff) |
+      ($h.items[] | select(.field == "status")) as $item |
+      {created: $h.created, ts: $ts, from: $item.fromString, to: $item.toString}
+    ] | sort_by(.ts) | last) as $lastChange |
+    select($lastChange != null) |
+    "Key:         \(.key)\n" +
+    "URL:         \($base)/browse/\(.key)\n" +
+    "Status:      \(.fields.status.name)\n" +
+    "Changed:     \($lastChange.from) -> \($lastChange.to) on \($lastChange.created[0:10])\n" +
+    "Summary:     \(.fields.summary)\n" +
+    "Description:\n\(.fields.description // "(none)")\n" +
+    "----------------------------------------"
+  ' <<<"$RESPONSE_BODY"
   exit 0
 fi
 
