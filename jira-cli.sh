@@ -35,6 +35,12 @@
 #                 project - prints key, URL, full description, and the
 #                 most recent status transition (from/to + date) made by
 #                 that user, for building status-report summaries
+#   futureactivity - the forward-looking counterpart to recentactivity:
+#                 list issues owned by (assigned to) a given user (default:
+#                 the PAT owner, or a specific Jira username via --user)
+#                 that are in an open sprint and not yet in a "Done"-type
+#                 status - i.e. remaining/upcoming work for that user in
+#                 the current sprint - optionally scoped to one project
 #
 # Usage:
 #   ./jira-cli.sh comment     <ISSUE-KEY> "<comment text>"          [env-file]
@@ -46,6 +52,7 @@
 #   ./jira-cli.sh field       <search-term> [env-file]
 #   ./jira-cli.sh search      <ISSUE-KEY | "text to search">  [--project <PROJECT-KEY>] [--sprint] [--env <env-file>]
 #   ./jira-cli.sh recentactivity [--days <n>] [--project <PROJECT-KEY>] [--user <jira-username>] [--env <env-file>]
+#   ./jira-cli.sh futureactivity [--project <PROJECT-KEY>] [--user <jira-username>] [--env <env-file>]
 #
 # Examples:
 #   ./jira-cli.sh comment EAWM-7384 "Applied topology spread constraints."
@@ -61,6 +68,8 @@
 #   ./jira-cli.sh recentactivity
 #   ./jira-cli.sh recentactivity --days 14 --project EAWM
 #   ./jira-cli.sh recentactivity --user macklin.mcbride@va.gov --days 7
+#   ./jira-cli.sh futureactivity
+#   ./jira-cli.sh futureactivity --user macklin.mcbride@va.gov --project EAWM
 #
 # Notes on 'assign' / create's --assignee (the issue "owner"):
 #   The assignee value must be the Jira account's "name" (username), which
@@ -119,13 +128,25 @@
 #   description - the from/to + date are what changed, the description is
 #   the raw material for writing a synopsis.
 #
+# Notes on 'futureactivity':
+#   Runs the JQL `assignee = <user> AND sprint in openSprints() AND
+#   statusCategory != Done` (optionally narrowed with `--project
+#   <PROJECT-KEY>`), where <user> defaults to `currentUser()` (the PAT
+#   owner) or a specific Jira username via `--user`. This is the mirror
+#   image of 'recentactivity': instead of looking backward at status
+#   changes already made, it looks forward at everything that user still
+#   owns and hasn't finished in the currently open sprint(s), regardless
+#   of who last changed its status - useful for previewing what's still
+#   ahead before it shows up in a future recentactivity report. No
+#   changelog is needed since past status changes aren't relevant here.
+#
 # The .env file (default: ./.env, next to this script) must define:
 #   PAT=<your jira personal access token>
 #
 set -euo pipefail
 
 if [[ $# -lt 1 ]]; then
-  echo "Usage: $0 <comment|description|transition|create|assign|mysprint|field|search|recentactivity> ..." >&2
+  echo "Usage: $0 <comment|description|transition|create|assign|mysprint|field|search|recentactivity|futureactivity> ..." >&2
   echo "Run with -h for full usage." >&2
   exit 1
 fi
@@ -250,8 +271,25 @@ case "$ACTION" in
       esac
     done
     ;;
+  futureactivity)
+    FUTURE_PROJECT=""
+    FUTURE_USER=""
+    ENV_FILE="$(dirname "$0")/.env"
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --project) FUTURE_PROJECT="$2"; shift 2 ;;
+        --user)    FUTURE_USER="$2"; shift 2 ;;
+        --env)     ENV_FILE="$2"; shift 2 ;;
+        *)
+          echo "ERROR: unrecognized futureactivity option '$1'" >&2
+          echo "Usage: $0 futureactivity [--project <PROJECT-KEY>] [--user <jira-username>] [--env <env-file>]" >&2
+          exit 1
+          ;;
+      esac
+    done
+    ;;
   *)
-    echo "ERROR: action must be one of comment, description, transition, create, assign, mysprint, field, search, recentactivity (got '$ACTION')" >&2
+    echo "ERROR: action must be one of comment, description, transition, create, assign, mysprint, field, search, recentactivity, futureactivity (got '$ACTION')" >&2
     exit 1
     ;;
 esac
@@ -514,6 +552,61 @@ if [[ "$ACTION" == "recentactivity" ]]; then
     "Description:\n\(.fields.description // "(none)")\n" +
     "----------------------------------------"
   ' <<<"$RESPONSE_BODY"
+  exit 0
+fi
+
+if [[ "$ACTION" == "futureactivity" ]]; then
+  # Same ownership criteria as 'recentactivity' (assignee = the target
+  # user), but looking forward: any issue in an open sprint that user
+  # owns and hasn't yet finished, rather than issues already changed in
+  # the past N days.
+  if [[ -n "$FUTURE_USER" ]]; then
+    JQL_ASSIGNEE="\"${FUTURE_USER}\""
+  else
+    JQL_ASSIGNEE="currentUser()"
+  fi
+
+  JQL="assignee = ${JQL_ASSIGNEE} AND sprint in openSprints() AND statusCategory != Done"
+  if [[ -n "$FUTURE_PROJECT" ]]; then
+    JQL="project = ${FUTURE_PROJECT} AND ${JQL}"
+  fi
+
+  ENCODED_JQL=$(jq -rn --arg jql "$JQL" '$jql|@uri')
+
+  RESPONSE=$(curl -s -w '\n%{http_code}' \
+    -H "Authorization: Bearer ${JIRA_PAT}" \
+    "${JIRA_BASE_URL}/rest/api/2/search?jql=${ENCODED_JQL}&fields=summary,status,issuetype,description,customfield_10000&maxResults=100")
+
+  HTTP_CODE=$(tail -n1 <<<"$RESPONSE")
+  RESPONSE_BODY=$(sed '$d' <<<"$RESPONSE")
+  unset JIRA_PAT
+
+  if [[ ! "$HTTP_CODE" =~ ^2 ]]; then
+    echo "ERROR: Jira API returned HTTP $HTTP_CODE" >&2
+    echo "$RESPONSE_BODY" >&2
+    exit 1
+  fi
+
+  COUNT=$(jq -r '.total' <<<"$RESPONSE_BODY")
+  if [[ "$COUNT" == "0" ]]; then
+    echo "No unfinished issues owned by ${FUTURE_USER:-you} in an open sprint${FUTURE_PROJECT:+ for project $FUTURE_PROJECT}."
+    exit 0
+  fi
+
+  # customfield_10000 (Sprint) values come back as greenhopper Sprint
+  # object toString()s, same as 'mysprint' - pull out id/name/state with
+  # a small regex rather than parsing it as JSON.
+  jq -r --arg base "$JIRA_BASE_URL" '
+    .issues[] |
+    "Key:         \(.key)\n" +
+    "URL:         \($base)/browse/\(.key)\n" +
+    "Type:        \(.fields.issuetype.name)\n" +
+    "Status:      \(.fields.status.name)\n" +
+    "Sprint:      \((.fields.customfield_10000 // ["(none)"])[-1])\n" +
+    "Summary:     \(.fields.summary)\n" +
+    "Description:\n\(.fields.description // "(none)")\n" +
+    "----------------------------------------"
+  ' <<<"$RESPONSE_BODY" | sed -E 's/^Sprint:.*id=([0-9]+),.*name=([^,]+),.*state=([A-Z]+).*$/Sprint:      id=\1 name=\2 state=\3/'
   exit 0
 fi
 
