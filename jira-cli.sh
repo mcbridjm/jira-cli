@@ -578,7 +578,7 @@ if [[ "$ACTION" == "recentactivity" ]]; then
     (.changelog.histories // []) as $histories |
     ([
       $histories[] |
-      select(.author.name == $me) |
+      select((.author.name | ascii_downcase) == ($me | ascii_downcase)) |
       . as $h |
       ($h.created | sub("\\.[0-9]+"; "") | strptime("%Y-%m-%dT%H:%M:%S%z") | mktime) as $ts |
       select($ts >= $cutoff) |
