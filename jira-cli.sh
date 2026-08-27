@@ -41,6 +41,11 @@
 #                 that are in an open sprint and not yet in a "Done"-type
 #                 status - i.e. remaining/upcoming work for that user in
 #                 the current sprint - optionally scoped to one project
+#   duesoon     - list issues with a given label whose due date falls
+#                 within the next N days (default 30), optionally scoped
+#                 to one project - a planning report independent of
+#                 assignee/sprint, e.g. for label-based (team/category)
+#                 lookahead rather than per-person status reporting
 #
 # Usage:
 #   ./jira-cli.sh comment     <ISSUE-KEY> "<comment text>"          [env-file]
@@ -53,6 +58,7 @@
 #   ./jira-cli.sh search      <ISSUE-KEY | "text to search">  [--project <PROJECT-KEY>] [--sprint] [--env <env-file>]
 #   ./jira-cli.sh recentactivity [--days <n>] [--project <PROJECT-KEY>] [--user <jira-username>] [--env <env-file>]
 #   ./jira-cli.sh futureactivity [--project <PROJECT-KEY>] [--user <jira-username>] [--env <env-file>]
+#   ./jira-cli.sh duesoon      <LABEL> [--project <PROJECT-KEY>] [--days <n>] [--env <env-file>]
 #
 # Examples:
 #   ./jira-cli.sh comment EAWM-7384 "Applied topology spread constraints."
@@ -70,6 +76,7 @@
 #   ./jira-cli.sh recentactivity --user macklin.mcbride@va.gov --days 7
 #   ./jira-cli.sh futureactivity
 #   ./jira-cli.sh futureactivity --user macklin.mcbride@va.gov --project EAWM
+#   ./jira-cli.sh duesoon Infrastructure --project EAWM --days 30
 #
 # Notes on 'assign' / create's --assignee (the issue "owner"):
 #   The assignee value must be the Jira account's "name" (username), which
@@ -140,13 +147,25 @@
 #   ahead before it shows up in a future recentactivity report. No
 #   changelog is needed since past status changes aren't relevant here.
 #
+# Notes on 'duesoon':
+#   Runs the JQL `labels = <LABEL> AND duedate >= 0d AND duedate <=
+#   <N>d` (default N=30, optionally narrowed with `--project
+#   <PROJECT-KEY>`), ordered by due date ascending. Unlike
+#   recentactivity/futureactivity, this is not scoped to any particular
+#   assignee - it's a label-based planning report (e.g. "everything
+#   labeled Infrastructure due in the next 30 days") that prints key,
+#   URL, due date, assignee, and full description for each match. Jira's
+#   `duedate` field must actually be set on an issue for it to appear
+#   here; on this instance, EAWM-8762 is an example of an issue with both
+#   a duedate and the Infrastructure label set.
+#
 # The .env file (default: ./.env, next to this script) must define:
 #   PAT=<your jira personal access token>
 #
 set -euo pipefail
 
 if [[ $# -lt 1 ]]; then
-  echo "Usage: $0 <comment|description|transition|create|assign|mysprint|field|search|recentactivity|futureactivity> ..." >&2
+  echo "Usage: $0 <comment|description|transition|create|assign|mysprint|field|search|recentactivity|futureactivity|duesoon> ..." >&2
   echo "Run with -h for full usage." >&2
   exit 1
 fi
@@ -288,8 +307,31 @@ case "$ACTION" in
       esac
     done
     ;;
+  duesoon)
+    if [[ $# -lt 1 ]]; then
+      echo "Usage: $0 duesoon <LABEL> [--project <PROJECT-KEY>] [--days <n>] [--env <env-file>]" >&2
+      exit 1
+    fi
+    DUESOON_LABEL="$1"
+    shift
+    DUESOON_PROJECT=""
+    DUESOON_DAYS=30
+    ENV_FILE="$(dirname "$0")/.env"
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --project) DUESOON_PROJECT="$2"; shift 2 ;;
+        --days)    DUESOON_DAYS="$2"; shift 2 ;;
+        --env)     ENV_FILE="$2"; shift 2 ;;
+        *)
+          echo "ERROR: unrecognized duesoon option '$1'" >&2
+          echo "Usage: $0 duesoon <LABEL> [--project <PROJECT-KEY>] [--days <n>] [--env <env-file>]" >&2
+          exit 1
+          ;;
+      esac
+    done
+    ;;
   *)
-    echo "ERROR: action must be one of comment, description, transition, create, assign, mysprint, field, search, recentactivity, futureactivity (got '$ACTION')" >&2
+    echo "ERROR: action must be one of comment, description, transition, create, assign, mysprint, field, search, recentactivity, futureactivity, duesoon (got '$ACTION')" >&2
     exit 1
     ;;
 esac
@@ -607,6 +649,53 @@ if [[ "$ACTION" == "futureactivity" ]]; then
     "Description:\n\(.fields.description // "(none)")\n" +
     "----------------------------------------"
   ' <<<"$RESPONSE_BODY" | sed -E 's/^Sprint:.*id=([0-9]+),.*name=([^,]+),.*state=([A-Z]+).*$/Sprint:      id=\1 name=\2 state=\3/'
+  exit 0
+fi
+
+if [[ "$ACTION" == "duesoon" ]]; then
+  # Anything with the given label whose due date falls between today and
+  # N days out (default 30) - a simple forward-looking planning report,
+  # independent of assignee/sprint.
+  JQL="labels = ${DUESOON_LABEL} AND duedate >= 0d AND duedate <= ${DUESOON_DAYS}d"
+  if [[ -n "$DUESOON_PROJECT" ]]; then
+    JQL="project = ${DUESOON_PROJECT} AND ${JQL}"
+  fi
+  JQL="${JQL} ORDER BY duedate ASC"
+
+  ENCODED_JQL=$(jq -rn --arg jql "$JQL" '$jql|@uri')
+
+  RESPONSE=$(curl -s -w '\n%{http_code}' \
+    -H "Authorization: Bearer ${JIRA_PAT}" \
+    "${JIRA_BASE_URL}/rest/api/2/search?jql=${ENCODED_JQL}&fields=summary,status,issuetype,description,duedate,assignee,labels&maxResults=100")
+
+  HTTP_CODE=$(tail -n1 <<<"$RESPONSE")
+  RESPONSE_BODY=$(sed '$d' <<<"$RESPONSE")
+  unset JIRA_PAT
+
+  if [[ ! "$HTTP_CODE" =~ ^2 ]]; then
+    echo "ERROR: Jira API returned HTTP $HTTP_CODE" >&2
+    echo "$RESPONSE_BODY" >&2
+    exit 1
+  fi
+
+  COUNT=$(jq -r '.total' <<<"$RESPONSE_BODY")
+  if [[ "$COUNT" == "0" ]]; then
+    echo "No issues labeled '${DUESOON_LABEL}' due in the next ${DUESOON_DAYS} day(s)${DUESOON_PROJECT:+ for project $DUESOON_PROJECT}."
+    exit 0
+  fi
+
+  jq -r --arg base "$JIRA_BASE_URL" '
+    .issues[] |
+    "Key:         \(.key)\n" +
+    "URL:         \($base)/browse/\(.key)\n" +
+    "Type:        \(.fields.issuetype.name)\n" +
+    "Status:      \(.fields.status.name)\n" +
+    "Due:         \(.fields.duedate // "(none)")\n" +
+    "Assignee:    \(.fields.assignee.displayName // "Unassigned")\n" +
+    "Summary:     \(.fields.summary)\n" +
+    "Description:\n\(.fields.description // "(none)")\n" +
+    "----------------------------------------"
+  ' <<<"$RESPONSE_BODY"
   exit 0
 fi
 
