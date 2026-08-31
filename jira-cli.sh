@@ -14,8 +14,11 @@
 #   transition  - move an existing issue to a new status (single workflow
 #                 hop only - see notes below for multi-step workflows)
 #   create      - create a new issue in a project, optionally setting its
-#                 issue type, owner/assignee, Epic Link, and Sprint
+#                 issue type, owner/assignee, Epic Link, Sprint, and labels
 #   assign      - assign an existing issue to a user (by Jira username)
+#   link        - link two existing issues together (default link type
+#                 "Relates"), e.g. to connect a new story to prior related
+#                 stories
 #   mysprint    - list issues assigned to the PAT owner in any open sprint
 #                 (optionally scoped to one project), printing key, URL,
 #                 status, issue type, description, and Sprint (id/name) for
@@ -51,8 +54,9 @@
 #   ./jira-cli.sh comment     <ISSUE-KEY> "<comment text>"          [env-file]
 #   ./jira-cli.sh description <ISSUE-KEY> "<description text>"     [env-file]
 #   ./jira-cli.sh transition  <ISSUE-KEY> "<target status name>"   [env-file]
-#   ./jira-cli.sh create      <PROJECT-KEY> "<summary>" "<description>" [--type <issuetype>] [--assignee <username>] [--epic <EPIC-KEY>] [--sprint <sprint-id>] [--env <env-file>]
+#   ./jira-cli.sh create      <PROJECT-KEY> "<summary>" "<description>" [--type <issuetype>] [--assignee <username>] [--epic <EPIC-KEY>] [--sprint <sprint-id>] [--labels <label1,label2>] [--env <env-file>]
 #   ./jira-cli.sh assign      <ISSUE-KEY> <assignee-username>       [env-file]
+#   ./jira-cli.sh link        <ISSUE-KEY> <TARGET-ISSUE-KEY> [--type <link-type>] [--env <env-file>]
 #   ./jira-cli.sh mysprint    [PROJECT-KEY] [env-file]
 #   ./jira-cli.sh field       <search-term> [env-file]
 #   ./jira-cli.sh search      <ISSUE-KEY | "text to search">  [--project <PROJECT-KEY>] [--sprint] [--env <env-file>]
@@ -66,7 +70,9 @@
 #   ./jira-cli.sh transition EAWM-7384 "Resolved"
 #   ./jira-cli.sh create EAWM "Promote topology spread constraints to Production" "$(cat followup-desc.txt)" --type Story --assignee adam.schaefer2@va.gov
 #   ./jira-cli.sh create EAWM "Research OCR true-up" "$(cat desc.txt)" --epic EAWM-8837 --sprint 52476 --assignee adam.schaefer2@va.gov
+#   ./jira-cli.sh create EAWM "WASA support" "$(cat desc.txt)" --labels Infrastructure,WASA --assignee adam.schaefer2@va.gov
 #   ./jira-cli.sh assign EAWM-7385 adam.schaefer2@va.gov
+#   ./jira-cli.sh link EAWM-9200 EAWM-5833 --type Relates
 #   ./jira-cli.sh mysprint EAWM
 #   ./jira-cli.sh field sprint
 #   ./jira-cli.sh search EAWM-8812
@@ -162,10 +168,21 @@
 # The .env file (default: ./.env, next to this script) must define:
 #   PAT=<your jira personal access token>
 #
-set -euo pipefail
+# Notes on create's --labels:
+#   Comma-separated list of labels to set on the new issue (e.g.
+#   "Infrastructure,WASA"). Labels must not contain spaces (Jira label
+#   convention); this is passed through as-is to the `labels` field.
+#
+# Notes on 'link':
+#   Creates a Jira issue link between two existing issues via POST
+#   /rest/api/2/issueLink. Defaults to link type "Relates" if --type is
+#   not given; the type name must match an existing Jira link type on
+#   this instance exactly (case-sensitive), e.g. "Relates", "Blocks",
+#   "Duplicate".
+#
 
 if [[ $# -lt 1 ]]; then
-  echo "Usage: $0 <comment|description|transition|create|assign|mysprint|field|search|recentactivity|futureactivity|duesoon> ..." >&2
+  echo "Usage: $0 <comment|description|transition|create|assign|link|mysprint|field|search|recentactivity|futureactivity|duesoon> ..." >&2
   echo "Run with -h for full usage." >&2
   exit 1
 fi
@@ -191,7 +208,7 @@ case "$ACTION" in
     ;;
   create)
     if [[ $# -lt 3 ]]; then
-      echo "Usage: $0 create <PROJECT-KEY> \"<summary>\" \"<description>\" [--type <issuetype>] [--assignee <username>] [--epic <EPIC-KEY>] [--sprint <sprint-id>] [--env <env-file>]" >&2
+      echo "Usage: $0 create <PROJECT-KEY> \"<summary>\" \"<description>\" [--type <issuetype>] [--assignee <username>] [--epic <EPIC-KEY>] [--sprint <sprint-id>] [--labels <label1,label2>] [--env <env-file>]" >&2
       exit 1
     fi
     PROJECT_KEY="$1"
@@ -202,6 +219,7 @@ case "$ACTION" in
     ASSIGNEE=""
     EPIC_LINK=""
     SPRINT_ID=""
+    LABELS=""
     ENV_FILE="$(dirname "$0")/.env"
     while [[ $# -gt 0 ]]; do
       case "$1" in
@@ -209,10 +227,11 @@ case "$ACTION" in
         --assignee) ASSIGNEE="$2"; shift 2 ;;
         --epic)     EPIC_LINK="$2"; shift 2 ;;
         --sprint)   SPRINT_ID="$2"; shift 2 ;;
+        --labels)   LABELS="$2"; shift 2 ;;
         --env)      ENV_FILE="$2"; shift 2 ;;
         *)
           echo "ERROR: unrecognized create option '$1'" >&2
-          echo "Usage: $0 create <PROJECT-KEY> \"<summary>\" \"<description>\" [--type <issuetype>] [--assignee <username>] [--epic <EPIC-KEY>] [--sprint <sprint-id>] [--env <env-file>]" >&2
+          echo "Usage: $0 create <PROJECT-KEY> \"<summary>\" \"<description>\" [--type <issuetype>] [--assignee <username>] [--epic <EPIC-KEY>] [--sprint <sprint-id>] [--labels <label1,label2>] [--env <env-file>]" >&2
           exit 1
           ;;
       esac
@@ -226,6 +245,28 @@ case "$ACTION" in
     ISSUE_KEY="$1"
     ASSIGNEE="$2"
     ENV_FILE="${3:-$(dirname "$0")/.env}"
+    ;;
+  link)
+    if [[ $# -lt 2 ]]; then
+      echo "Usage: $0 link <ISSUE-KEY> <TARGET-ISSUE-KEY> [--type <link-type>] [--env <env-file>]" >&2
+      exit 1
+    fi
+    ISSUE_KEY="$1"
+    TARGET_KEY="$2"
+    shift 2
+    LINK_TYPE="Relates"
+    ENV_FILE="$(dirname "$0")/.env"
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --type) LINK_TYPE="$2"; shift 2 ;;
+        --env)  ENV_FILE="$2"; shift 2 ;;
+        *)
+          echo "ERROR: unrecognized link option '$1'" >&2
+          echo "Usage: $0 link <ISSUE-KEY> <TARGET-ISSUE-KEY> [--type <link-type>] [--env <env-file>]" >&2
+          exit 1
+          ;;
+      esac
+    done
     ;;
   mysprint)
     # Both args are optional: a bare project key (no '/', no '.env' suffix)
@@ -331,7 +372,7 @@ case "$ACTION" in
     done
     ;;
   *)
-    echo "ERROR: action must be one of comment, description, transition, create, assign, mysprint, field, search, recentactivity, futureactivity, duesoon (got '$ACTION')" >&2
+    echo "ERROR: action must be one of comment, description, transition, create, assign, link, mysprint, field, search, recentactivity, futureactivity, duesoon (got '$ACTION')" >&2
     exit 1
     ;;
 esac
@@ -741,10 +782,12 @@ case "$ACTION" in
       --arg assignee "$ASSIGNEE" \
       --arg epic "$EPIC_LINK" \
       --arg sprint "$SPRINT_ID" \
+      --arg labels "$LABELS" \
       '{fields: ({project: {key: $project}, issuetype: {name: $issuetype}, summary: $summary, description: $description}
         + (if $assignee != "" then {assignee: {name: $assignee}} else {} end)
         + (if $epic != "" then {customfield_10001: $epic} else {} end)
-        + (if $sprint != "" then {customfield_10000: ($sprint | tonumber)} else {} end))}')
+        + (if $sprint != "" then {customfield_10000: ($sprint | tonumber)} else {} end)
+        + (if $labels != "" then {labels: ($labels | split(",") | map(select(length > 0)))} else {} end))}')
     URL="${JIRA_BASE_URL}/rest/api/2/issue"
     METHOD="POST"
     ;;
@@ -752,6 +795,15 @@ case "$ACTION" in
     BODY_JSON=$(jq -n --arg name "$ASSIGNEE" '{name: $name}')
     URL="${JIRA_BASE_URL}/rest/api/2/issue/${ISSUE_KEY}/assignee"
     METHOD="PUT"
+    ;;
+  link)
+    BODY_JSON=$(jq -n \
+      --arg type "$LINK_TYPE" \
+      --arg inward "$ISSUE_KEY" \
+      --arg outward "$TARGET_KEY" \
+      '{type: {name: $type}, inwardIssue: {key: $inward}, outwardIssue: {key: $outward}}')
+    URL="${JIRA_BASE_URL}/rest/api/2/issueLink"
+    METHOD="POST"
     ;;
 esac
 
@@ -783,6 +835,9 @@ if [[ "$HTTP_CODE" =~ ^2 ]]; then
       ;;
     assign)
       echo "Assigned $ISSUE_KEY to '$ASSIGNEE' successfully (HTTP $HTTP_CODE)."
+      ;;
+    link)
+      echo "Linked $ISSUE_KEY to $TARGET_KEY with type '$LINK_TYPE' successfully (HTTP $HTTP_CODE)."
       ;;
     *)
       echo "${ACTION^} updated successfully on $ISSUE_KEY (HTTP $HTTP_CODE)."
