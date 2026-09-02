@@ -48,7 +48,7 @@ git-ignored and must never be committed.
 ./jira-cli.sh comment     <ISSUE-KEY> "<comment text>"                       [env-file]
 ./jira-cli.sh description <ISSUE-KEY> "<description text>"                  [env-file]
 ./jira-cli.sh transition  <ISSUE-KEY> "<target status name>"                [env-file]
-./jira-cli.sh create      <PROJECT-KEY> "<summary>" "<description>" [--type <issuetype>] [--assignee <username>] [--epic <EPIC-KEY>] [--sprint <sprint-id>] [--env <env-file>]
+./jira-cli.sh create      <PROJECT-KEY> "<summary>" "<description>" [--type <issuetype>] [--assignee <username>] [--epic <EPIC-KEY>] [--sprint <sprint-id>] [--epicname <name>] [--env <env-file>]
 ./jira-cli.sh assign      <ISSUE-KEY> <assignee-username>                   [env-file]
 ./jira-cli.sh mysprint    [PROJECT-KEY]                                     [env-file]
 ./jira-cli.sh field       <search-term>                                     [env-file]
@@ -66,6 +66,7 @@ usage/help text and exits without making any Jira calls.
 ./jira-cli.sh transition EAWM-7384 "Resolved"
 ./jira-cli.sh create EAWM "Promote topology spread constraints to Production" "$(cat followup-desc.txt)" --type Story --assignee adam.schaefer2@va.gov
 ./jira-cli.sh create EAWM "Research OCR true-up" "$(cat desc.txt)" --epic EAWM-8837 --sprint 52476 --assignee adam.schaefer2@va.gov
+./jira-cli.sh create EAWM "Cloud Spend Savings" "$(cat epic-desc.txt)" --type Epic --epicname "Cloud Spend Savings" --assignee adam.schaefer2@va.gov
 ./jira-cli.sh assign EAWM-7385 adam.schaefer2@va.gov
 ./jira-cli.sh mysprint EAWM
 ./jira-cli.sh field sprint
@@ -94,9 +95,11 @@ usage/help text and exits without making any Jira calls.
   `fields.issuetype.name` (default `Story`), `fields.summary`,
   `fields.description`, and optionally `fields.assignee.name` (`--assignee`),
   `customfield_10001` (`--epic`, the Epic Link field — takes the epic's
-  issue key, e.g. `EAWM-8837`), and `customfield_10000` (`--sprint`, the
+  issue key, e.g. `EAWM-8837`), `customfield_10000` (`--sprint`, the
   Sprint field — takes the sprint's **numeric id**, e.g. `52476`, not its
-  display name). Jira validates the whole payload atomically, so a failed
+  display name), and `customfield_10003` (`--epicname`, the **Epic Name**
+  field — required by Jira when `--type Epic` is used; ignored for other
+  issue types). Jira validates the whole payload atomically, so a failed
   create (e.g. missing a required custom field) does not leave a
   partial/broken issue behind. Use `mysprint` to find the active sprint's
   id, and `field` to re-discover the Epic Link/Sprint custom field ids if

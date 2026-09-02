@@ -54,7 +54,7 @@
 #   ./jira-cli.sh comment     <ISSUE-KEY> "<comment text>"          [env-file]
 #   ./jira-cli.sh description <ISSUE-KEY> "<description text>"     [env-file]
 #   ./jira-cli.sh transition  <ISSUE-KEY> "<target status name>"   [env-file]
-#   ./jira-cli.sh create      <PROJECT-KEY> "<summary>" "<description>" [--type <issuetype>] [--assignee <username>] [--epic <EPIC-KEY>] [--sprint <sprint-id>] [--labels <label1,label2>] [--env <env-file>]
+#   ./jira-cli.sh create      <PROJECT-KEY> "<summary>" "<description>" [--type <issuetype>] [--assignee <username>] [--epic <EPIC-KEY>] [--sprint <sprint-id>] [--labels <label1,label2>] [--epicname <name>] [--env <env-file>]
 #   ./jira-cli.sh assign      <ISSUE-KEY> <assignee-username>       [env-file]
 #   ./jira-cli.sh link        <ISSUE-KEY> <TARGET-ISSUE-KEY> [--type <link-type>] [--env <env-file>]
 #   ./jira-cli.sh mysprint    [PROJECT-KEY] [env-file]
@@ -208,7 +208,7 @@ case "$ACTION" in
     ;;
   create)
     if [[ $# -lt 3 ]]; then
-      echo "Usage: $0 create <PROJECT-KEY> \"<summary>\" \"<description>\" [--type <issuetype>] [--assignee <username>] [--epic <EPIC-KEY>] [--sprint <sprint-id>] [--labels <label1,label2>] [--env <env-file>]" >&2
+      echo "Usage: $0 create <PROJECT-KEY> \"<summary>\" \"<description>\" [--type <issuetype>] [--assignee <username>] [--epic <EPIC-KEY>] [--sprint <sprint-id>] [--labels <label1,label2>] [--epicname <name>] [--env <env-file>]" >&2
       exit 1
     fi
     PROJECT_KEY="$1"
@@ -220,6 +220,7 @@ case "$ACTION" in
     EPIC_LINK=""
     SPRINT_ID=""
     LABELS=""
+    EPIC_NAME=""
     ENV_FILE="$(dirname "$0")/.env"
     while [[ $# -gt 0 ]]; do
       case "$1" in
@@ -228,10 +229,11 @@ case "$ACTION" in
         --epic)     EPIC_LINK="$2"; shift 2 ;;
         --sprint)   SPRINT_ID="$2"; shift 2 ;;
         --labels)   LABELS="$2"; shift 2 ;;
+        --epicname) EPIC_NAME="$2"; shift 2 ;;
         --env)      ENV_FILE="$2"; shift 2 ;;
         *)
           echo "ERROR: unrecognized create option '$1'" >&2
-          echo "Usage: $0 create <PROJECT-KEY> \"<summary>\" \"<description>\" [--type <issuetype>] [--assignee <username>] [--epic <EPIC-KEY>] [--sprint <sprint-id>] [--labels <label1,label2>] [--env <env-file>]" >&2
+          echo "Usage: $0 create <PROJECT-KEY> \"<summary>\" \"<description>\" [--type <issuetype>] [--assignee <username>] [--epic <EPIC-KEY>] [--sprint <sprint-id>] [--labels <label1,label2>] [--epicname <name>] [--env <env-file>]" >&2
           exit 1
           ;;
       esac
@@ -783,11 +785,13 @@ case "$ACTION" in
       --arg epic "$EPIC_LINK" \
       --arg sprint "$SPRINT_ID" \
       --arg labels "$LABELS" \
+      --arg epicname "$EPIC_NAME" \
       '{fields: ({project: {key: $project}, issuetype: {name: $issuetype}, summary: $summary, description: $description}
         + (if $assignee != "" then {assignee: {name: $assignee}} else {} end)
         + (if $epic != "" then {customfield_10001: $epic} else {} end)
         + (if $sprint != "" then {customfield_10000: ($sprint | tonumber)} else {} end)
-        + (if $labels != "" then {labels: ($labels | split(",") | map(select(length > 0)))} else {} end))}')
+        + (if $labels != "" then {labels: ($labels | split(",") | map(select(length > 0)))} else {} end)
+        + (if $epicname != "" then {customfield_10003: $epicname} else {} end))}')
     URL="${JIRA_BASE_URL}/rest/api/2/issue"
     METHOD="POST"
     ;;
