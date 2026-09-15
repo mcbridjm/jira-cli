@@ -49,6 +49,12 @@
 #                 to one project - a planning report independent of
 #                 assignee/sprint, e.g. for label-based (team/category)
 #                 lookahead rather than per-person status reporting
+#   setparent   - set an issue's Advanced Roadmaps "Parent Link" field
+#                 (customfield_11703) to another issue's key - used to
+#                 nest one Epic under a higher-level parent Epic/Initiative
+#                 (this is separate from Epic Link, which links a Story to
+#                 its owning Epic; Parent Link links an Epic upward to a
+#                 parent issue in the Advanced Roadmaps hierarchy)
 #
 # Usage:
 #   ./jira-cli.sh comment     <ISSUE-KEY> "<comment text>"          [env-file]
@@ -63,6 +69,7 @@
 #   ./jira-cli.sh recentactivity [--days <n>] [--project <PROJECT-KEY>] [--user <jira-username>] [--env <env-file>]
 #   ./jira-cli.sh futureactivity [--project <PROJECT-KEY>] [--user <jira-username>] [--env <env-file>]
 #   ./jira-cli.sh duesoon      <LABEL> [--project <PROJECT-KEY>] [--days <n>] [--env <env-file>]
+#   ./jira-cli.sh setparent   <ISSUE-KEY> <PARENT-ISSUE-KEY>        [env-file]
 #
 # Examples:
 #   ./jira-cli.sh comment EAWM-7384 "Applied topology spread constraints."
@@ -165,6 +172,16 @@
 #   here; on this instance, EAWM-8762 is an example of an issue with both
 #   a duedate and the Infrastructure label set.
 #
+# Notes on 'setparent':
+#   Sets customfield_11703 ("Parent Link", the Advanced Roadmaps field
+#   com.atlassian.jpo:jpo-custom-field-parent on this instance) on an
+#   existing issue to point at another issue's key, e.g. to nest an Epic
+#   under a higher-level parent Epic/Initiative. This is distinct from
+#   Epic Link (customfield_10001), which links a Story down to its owning
+#   Epic - Parent Link links an Epic upward to its parent in the
+#   Advanced Roadmaps hierarchy. The field accepts a plain issue key
+#   string as its value.
+#
 # The .env file (default: ./.env, next to this script) must define:
 #   PAT=<your jira personal access token>
 #
@@ -182,7 +199,7 @@
 #
 
 if [[ $# -lt 1 ]]; then
-  echo "Usage: $0 <comment|description|transition|create|assign|link|mysprint|field|search|recentactivity|futureactivity|duesoon> ..." >&2
+  echo "Usage: $0 <comment|description|transition|create|assign|link|mysprint|field|search|recentactivity|futureactivity|duesoon|setparent> ..." >&2
   echo "Run with -h for full usage." >&2
   exit 1
 fi
@@ -373,8 +390,17 @@ case "$ACTION" in
       esac
     done
     ;;
+  setparent)
+    if [[ $# -lt 2 ]]; then
+      echo "Usage: $0 setparent <ISSUE-KEY> <PARENT-ISSUE-KEY> [env-file]" >&2
+      exit 1
+    fi
+    ISSUE_KEY="$1"
+    PARENT_KEY="$2"
+    ENV_FILE="${3:-$(dirname "$0")/.env}"
+    ;;
   *)
-    echo "ERROR: action must be one of comment, description, transition, create, assign, link, mysprint, field, search, recentactivity, futureactivity, duesoon (got '$ACTION')" >&2
+    echo "ERROR: action must be one of comment, description, transition, create, assign, link, mysprint, field, search, recentactivity, futureactivity, duesoon, setparent (got '$ACTION')" >&2
     exit 1
     ;;
 esac
@@ -809,6 +835,11 @@ case "$ACTION" in
     URL="${JIRA_BASE_URL}/rest/api/2/issueLink"
     METHOD="POST"
     ;;
+  setparent)
+    BODY_JSON=$(jq -n --arg parent "$PARENT_KEY" '{fields: {customfield_11703: $parent}}')
+    URL="${JIRA_BASE_URL}/rest/api/2/issue/${ISSUE_KEY}"
+    METHOD="PUT"
+    ;;
 esac
 
 RESPONSE=$(curl -s -w '\n%{http_code}' \
@@ -842,6 +873,9 @@ if [[ "$HTTP_CODE" =~ ^2 ]]; then
       ;;
     link)
       echo "Linked $ISSUE_KEY to $TARGET_KEY with type '$LINK_TYPE' successfully (HTTP $HTTP_CODE)."
+      ;;
+    setparent)
+      echo "Set Parent Link on $ISSUE_KEY to $PARENT_KEY successfully (HTTP $HTTP_CODE)."
       ;;
     *)
       echo "${ACTION^} updated successfully on $ISSUE_KEY (HTTP $HTTP_CODE)."

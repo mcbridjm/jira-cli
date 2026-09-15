@@ -41,6 +41,7 @@ git-ignored and must never be committed.
 | `mysprint`    | List issues assigned to you (the PAT owner) in any open sprint, including each issue's Sprint id/name |
 | `field`       | Look up custom field ids by (partial, case-insensitive) name match   |
 | `search`      | Look up issue(s) by issue key or free text and print their full content |
+| `setparent`   | Set an issue's Advanced Roadmaps "Parent Link" field to nest it (e.g. an Epic) under a parent issue |
 
 ### Usage
 
@@ -53,6 +54,7 @@ git-ignored and must never be committed.
 ./jira-cli.sh mysprint    [PROJECT-KEY]                                     [env-file]
 ./jira-cli.sh field       <search-term>                                     [env-file]
 ./jira-cli.sh search      <ISSUE-KEY | "text to search">  [--project <PROJECT-KEY>] [--sprint] [--env <env-file>]
+./jira-cli.sh setparent   <ISSUE-KEY> <PARENT-ISSUE-KEY>                    [env-file]
 ```
 
 Running the script with no arguments (or `-h`/`--help`) prints the full
@@ -72,6 +74,7 @@ usage/help text and exits without making any Jira calls.
 ./jira-cli.sh field sprint
 ./jira-cli.sh search EAWM-8812
 ./jira-cli.sh search "Account Re-use" --project EAWM --sprint
+./jira-cli.sh setparent EAWM-9246 EAWM-9263
 ```
 
 ## How each action works
@@ -141,6 +144,14 @@ usage/help text and exits without making any Jira calls.
   scoping). Each result prints key, browse URL, issue type, status,
   assignee, Sprint (id/name/state), full summary/description, and any
   comments.
+- **`setparent`** — `PUT /rest/api/2/issue/<key>` with
+  `{"fields": {"customfield_11703": "<PARENT-ISSUE-KEY>"}}`.
+  `customfield_11703` is this instance's Advanced Roadmaps "Parent Link"
+  field (`com.atlassian.jpo:jpo-custom-field-parent`), which is distinct
+  from Epic Link (`customfield_10001`, used to link a Story down to its
+  owning Epic) — Parent Link links an issue (e.g. an Epic) *upward* to a
+  parent issue, which is how multiple Epics get nested/grouped under one
+  umbrella Epic in Advanced Roadmaps-style hierarchies on this instance.
 
 ## Why it works this way
 
