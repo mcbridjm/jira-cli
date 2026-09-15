@@ -55,6 +55,8 @@
 #                 (this is separate from Epic Link, which links a Story to
 #                 its owning Epic; Parent Link links an Epic upward to a
 #                 parent issue in the Advanced Roadmaps hierarchy)
+#   removelabel - remove a single label from an existing issue's labels
+#                 field, leaving all other labels on the issue untouched
 #
 # Usage:
 #   ./jira-cli.sh comment     <ISSUE-KEY> "<comment text>"          [env-file]
@@ -70,6 +72,7 @@
 #   ./jira-cli.sh futureactivity [--project <PROJECT-KEY>] [--user <jira-username>] [--env <env-file>]
 #   ./jira-cli.sh duesoon      <LABEL> [--project <PROJECT-KEY>] [--days <n>] [--env <env-file>]
 #   ./jira-cli.sh setparent   <ISSUE-KEY> <PARENT-ISSUE-KEY>        [env-file]
+#   ./jira-cli.sh removelabel <ISSUE-KEY> <label>                   [env-file]
 #
 # Examples:
 #   ./jira-cli.sh comment EAWM-7384 "Applied topology spread constraints."
@@ -182,6 +185,15 @@
 #   Advanced Roadmaps hierarchy. The field accepts a plain issue key
 #   string as its value.
 #
+# Notes on 'removelabel':
+#   Fetches the issue's current `labels` field via GET
+#   /rest/api/2/issue/<key>, removes the given label (case-sensitive
+#   exact match) from the list if present, and PUTs the resulting list
+#   back with `{"fields": {"labels": [...]}}`. All other labels on the
+#   issue are preserved. If the label is not present, the issue's labels
+#   are left unchanged (a no-op PUT) and a message is printed rather than
+#   erroring, since the desired end state (label absent) already holds.
+#
 # The .env file (default: ./.env, next to this script) must define:
 #   PAT=<your jira personal access token>
 #
@@ -199,7 +211,7 @@
 #
 
 if [[ $# -lt 1 ]]; then
-  echo "Usage: $0 <comment|description|transition|create|assign|link|mysprint|field|search|recentactivity|futureactivity|duesoon|setparent> ..." >&2
+  echo "Usage: $0 <comment|description|transition|create|assign|link|mysprint|field|search|recentactivity|futureactivity|duesoon|setparent|removelabel> ..." >&2
   echo "Run with -h for full usage." >&2
   exit 1
 fi
@@ -399,8 +411,17 @@ case "$ACTION" in
     PARENT_KEY="$2"
     ENV_FILE="${3:-$(dirname "$0")/.env}"
     ;;
+  removelabel)
+    if [[ $# -lt 2 ]]; then
+      echo "Usage: $0 removelabel <ISSUE-KEY> <label> [env-file]" >&2
+      exit 1
+    fi
+    ISSUE_KEY="$1"
+    REMOVE_LABEL="$2"
+    ENV_FILE="${3:-$(dirname "$0")/.env}"
+    ;;
   *)
-    echo "ERROR: action must be one of comment, description, transition, create, assign, link, mysprint, field, search, recentactivity, futureactivity, duesoon, setparent (got '$ACTION')" >&2
+    echo "ERROR: action must be one of comment, description, transition, create, assign, link, mysprint, field, search, recentactivity, futureactivity, duesoon, setparent, removelabel (got '$ACTION')" >&2
     exit 1
     ;;
 esac
@@ -766,6 +787,54 @@ if [[ "$ACTION" == "duesoon" ]]; then
     "----------------------------------------"
   ' <<<"$RESPONSE_BODY"
   exit 0
+fi
+
+if [[ "$ACTION" == "removelabel" ]]; then
+  # Two-step operation: fetch the issue's current labels, then PUT back
+  # the list with the target label removed (all other labels preserved).
+  GET_RESPONSE=$(curl -s -w '\n%{http_code}' \
+    -H "Authorization: Bearer ${JIRA_PAT}" \
+    "${JIRA_BASE_URL}/rest/api/2/issue/${ISSUE_KEY}?fields=labels")
+
+  GET_HTTP_CODE=$(tail -n1 <<<"$GET_RESPONSE")
+  GET_BODY=$(sed '$d' <<<"$GET_RESPONSE")
+
+  if [[ ! "$GET_HTTP_CODE" =~ ^2 ]]; then
+    unset JIRA_PAT
+    echo "ERROR: Jira API returned HTTP $GET_HTTP_CODE (fetching $ISSUE_KEY)" >&2
+    echo "$GET_BODY" >&2
+    exit 1
+  fi
+
+  HAS_LABEL=$(jq -r --arg target "$REMOVE_LABEL" '(.fields.labels // []) | any(. == $target)' <<<"$GET_BODY")
+  if [[ "$HAS_LABEL" != "true" ]]; then
+    unset JIRA_PAT
+    echo "Label '${REMOVE_LABEL}' is not present on ${ISSUE_KEY}; nothing to do."
+    exit 0
+  fi
+
+  NEW_LABELS_JSON=$(jq -c --arg target "$REMOVE_LABEL" '(.fields.labels // []) | map(select(. != $target))' <<<"$GET_BODY")
+  BODY_JSON=$(jq -n --argjson labels "$NEW_LABELS_JSON" '{fields: {labels: $labels}}')
+
+  RESPONSE=$(curl -s -w '\n%{http_code}' \
+    -X PUT \
+    -H "Authorization: Bearer ${JIRA_PAT}" \
+    -H "Content-Type: application/json" \
+    -d "$BODY_JSON" \
+    "${JIRA_BASE_URL}/rest/api/2/issue/${ISSUE_KEY}")
+
+  HTTP_CODE=$(tail -n1 <<<"$RESPONSE")
+  RESPONSE_BODY=$(sed '$d' <<<"$RESPONSE")
+  unset JIRA_PAT
+
+  if [[ "$HTTP_CODE" =~ ^2 ]]; then
+    echo "Removed label '${REMOVE_LABEL}' from ${ISSUE_KEY} successfully (HTTP $HTTP_CODE)."
+    exit 0
+  else
+    echo "ERROR: Jira API returned HTTP $HTTP_CODE" >&2
+    echo "$RESPONSE_BODY" >&2
+    exit 1
+  fi
 fi
 
 case "$ACTION" in

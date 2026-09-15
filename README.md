@@ -42,6 +42,7 @@ git-ignored and must never be committed.
 | `field`       | Look up custom field ids by (partial, case-insensitive) name match   |
 | `search`      | Look up issue(s) by issue key or free text and print their full content |
 | `setparent`   | Set an issue's Advanced Roadmaps "Parent Link" field to nest it (e.g. an Epic) under a parent issue |
+| `removelabel` | Remove a single label from an existing issue, leaving all other labels untouched |
 
 ### Usage
 
@@ -55,6 +56,7 @@ git-ignored and must never be committed.
 ./jira-cli.sh field       <search-term>                                     [env-file]
 ./jira-cli.sh search      <ISSUE-KEY | "text to search">  [--project <PROJECT-KEY>] [--sprint] [--env <env-file>]
 ./jira-cli.sh setparent   <ISSUE-KEY> <PARENT-ISSUE-KEY>                    [env-file]
+./jira-cli.sh removelabel <ISSUE-KEY> <label>                               [env-file]
 ```
 
 Running the script with no arguments (or `-h`/`--help`) prints the full
@@ -75,6 +77,7 @@ usage/help text and exits without making any Jira calls.
 ./jira-cli.sh search EAWM-8812
 ./jira-cli.sh search "Account Re-use" --project EAWM --sprint
 ./jira-cli.sh setparent EAWM-9246 EAWM-9263
+./jira-cli.sh removelabel EAWM-9246 Team5
 ```
 
 ## How each action works
@@ -152,6 +155,14 @@ usage/help text and exits without making any Jira calls.
   owning Epic) — Parent Link links an issue (e.g. an Epic) *upward* to a
   parent issue, which is how multiple Epics get nested/grouped under one
   umbrella Epic in Advanced Roadmaps-style hierarchies on this instance.
+- **`removelabel`** — Fetches the issue's current `labels` field via
+  `GET /rest/api/2/issue/<key>?fields=labels`, removes the given label
+  (case-sensitive exact match) from the list if present, and PUTs the
+  resulting list back with `{"fields": {"labels": [...]}}`. All other
+  labels on the issue are preserved. If the label is not present, the
+  issue's labels are left unchanged and a friendly message is printed
+  instead of an error, since the desired end state (label absent)
+  already holds.
 
 ## Why it works this way
 
