@@ -1,4 +1,4 @@
-# jira-issue-update.sh
+# jira-cli.sh
 
 A single, function-agnostic bash script for automating common Jira actions
 against `https://jira.devops.va.gov` (a Jira Server/Data Center instance)
@@ -40,17 +40,23 @@ git-ignored and must never be committed.
 | `assign`      | Assign an existing issue to a user                                   |
 | `mysprint`    | List issues assigned to you (the PAT owner) in any open sprint, including each issue's Sprint id/name |
 | `field`       | Look up custom field ids by (partial, case-insensitive) name match   |
+| `search`      | Look up issue(s) by issue key or free text and print their full content |
+| `setparent`   | Set an issue's Advanced Roadmaps "Parent Link" field to nest it (e.g. an Epic) under a parent issue |
+| `removelabel` | Remove a single label from an existing issue, leaving all other labels untouched |
 
 ### Usage
 
 ```bash
-./jira-issue-update.sh comment     <ISSUE-KEY> "<comment text>"                       [env-file]
-./jira-issue-update.sh description <ISSUE-KEY> "<description text>"                  [env-file]
-./jira-issue-update.sh transition  <ISSUE-KEY> "<target status name>"                [env-file]
-./jira-issue-update.sh create      <PROJECT-KEY> "<summary>" "<description>" [--type <issuetype>] [--assignee <username>] [--epic <EPIC-KEY>] [--sprint <sprint-id>] [--env <env-file>]
-./jira-issue-update.sh assign      <ISSUE-KEY> <assignee-username>                   [env-file]
-./jira-issue-update.sh mysprint    [PROJECT-KEY]                                     [env-file]
-./jira-issue-update.sh field       <search-term>                                     [env-file]
+./jira-cli.sh comment     <ISSUE-KEY> "<comment text>"                       [env-file]
+./jira-cli.sh description <ISSUE-KEY> "<description text>"                  [env-file]
+./jira-cli.sh transition  <ISSUE-KEY> "<target status name>"                [env-file]
+./jira-cli.sh create      <PROJECT-KEY> "<summary>" "<description>" [--type <issuetype>] [--assignee <username>] [--epic <EPIC-KEY>] [--sprint <sprint-id>] [--epicname <name>] [--env <env-file>]
+./jira-cli.sh assign      <ISSUE-KEY> <assignee-username>                   [env-file]
+./jira-cli.sh mysprint    [PROJECT-KEY]                                     [env-file]
+./jira-cli.sh field       <search-term>                                     [env-file]
+./jira-cli.sh search      <ISSUE-KEY | "text to search">  [--project <PROJECT-KEY>] [--sprint] [--env <env-file>]
+./jira-cli.sh setparent   <ISSUE-KEY> <PARENT-ISSUE-KEY>                    [env-file]
+./jira-cli.sh removelabel <ISSUE-KEY> <label>                               [env-file]
 ```
 
 Running the script with no arguments (or `-h`/`--help`) prints the full
@@ -59,14 +65,19 @@ usage/help text and exits without making any Jira calls.
 ### Examples
 
 ```bash
-./jira-issue-update.sh comment EAWM-7384 "Applied topology spread constraints."
-./jira-issue-update.sh description EAWM-7384 "$(cat new-description.txt)"
-./jira-issue-update.sh transition EAWM-7384 "Resolved"
-./jira-issue-update.sh create EAWM "Promote topology spread constraints to Production" "$(cat followup-desc.txt)" --type Story --assignee adam.schaefer2@va.gov
-./jira-issue-update.sh create EAWM "Research OCR true-up" "$(cat desc.txt)" --epic EAWM-8837 --sprint 52476 --assignee adam.schaefer2@va.gov
-./jira-issue-update.sh assign EAWM-7385 adam.schaefer2@va.gov
-./jira-issue-update.sh mysprint EAWM
-./jira-issue-update.sh field sprint
+./jira-cli.sh comment EAWM-7384 "Applied topology spread constraints."
+./jira-cli.sh description EAWM-7384 "$(cat new-description.txt)"
+./jira-cli.sh transition EAWM-7384 "Resolved"
+./jira-cli.sh create EAWM "Promote topology spread constraints to Production" "$(cat followup-desc.txt)" --type Story --assignee adam.schaefer2@va.gov
+./jira-cli.sh create EAWM "Research OCR true-up" "$(cat desc.txt)" --epic EAWM-8837 --sprint 52476 --assignee adam.schaefer2@va.gov
+./jira-cli.sh create EAWM "Cloud Spend Savings" "$(cat epic-desc.txt)" --type Epic --epicname "Cloud Spend Savings" --assignee adam.schaefer2@va.gov
+./jira-cli.sh assign EAWM-7385 adam.schaefer2@va.gov
+./jira-cli.sh mysprint EAWM
+./jira-cli.sh field sprint
+./jira-cli.sh search EAWM-8812
+./jira-cli.sh search "Account Re-use" --project EAWM --sprint
+./jira-cli.sh setparent EAWM-9246 EAWM-9263
+./jira-cli.sh removelabel EAWM-9246 Team5
 ```
 
 ## How each action works
@@ -90,9 +101,11 @@ usage/help text and exits without making any Jira calls.
   `fields.issuetype.name` (default `Story`), `fields.summary`,
   `fields.description`, and optionally `fields.assignee.name` (`--assignee`),
   `customfield_10001` (`--epic`, the Epic Link field — takes the epic's
-  issue key, e.g. `EAWM-8837`), and `customfield_10000` (`--sprint`, the
+  issue key, e.g. `EAWM-8837`), `customfield_10000` (`--sprint`, the
   Sprint field — takes the sprint's **numeric id**, e.g. `52476`, not its
-  display name). Jira validates the whole payload atomically, so a failed
+  display name), and `customfield_10003` (`--epicname`, the **Epic Name**
+  field — required by Jira when `--type Epic` is used; ignored for other
+  issue types). Jira validates the whole payload atomically, so a failed
   create (e.g. missing a required custom field) does not leave a
   partial/broken issue behind. Use `mysprint` to find the active sprint's
   id, and `field` to re-discover the Epic Link/Sprint custom field ids if
@@ -122,6 +135,34 @@ usage/help text and exits without making any Jira calls.
   (`customfield_10001`) and Sprint (`customfield_10000`) field ids for
   `create --epic`/`--sprint` — it's now a first-class action so that
   lookup is repeatable instead of a one-off throwaway script.
+- **`search`** — Looks up issue(s) and prints their **full** content
+  (unlike `mysprint`'s 300-character description snippet). If the query
+  looks like an issue key (e.g. `EAWM-8812`), it's fetched directly via
+  `GET /rest/api/2/issue/<key>`. Otherwise the query is treated as free
+  text and run as a JQL `text ~ "<query>"` search via
+  `GET /rest/api/2/search` (Jira's full-text search across
+  summary/description/comments/etc.), optionally narrowed with
+  `--project <PROJECT-KEY>` and/or `--sprint` (adds
+  `AND sprint in openSprints()`, matching `mysprint`'s open-sprint
+  scoping). Each result prints key, browse URL, issue type, status,
+  assignee, Sprint (id/name/state), full summary/description, and any
+  comments.
+- **`setparent`** — `PUT /rest/api/2/issue/<key>` with
+  `{"fields": {"customfield_11703": "<PARENT-ISSUE-KEY>"}}`.
+  `customfield_11703` is this instance's Advanced Roadmaps "Parent Link"
+  field (`com.atlassian.jpo:jpo-custom-field-parent`), which is distinct
+  from Epic Link (`customfield_10001`, used to link a Story down to its
+  owning Epic) — Parent Link links an issue (e.g. an Epic) *upward* to a
+  parent issue, which is how multiple Epics get nested/grouped under one
+  umbrella Epic in Advanced Roadmaps-style hierarchies on this instance.
+- **`removelabel`** — Fetches the issue's current `labels` field via
+  `GET /rest/api/2/issue/<key>?fields=labels`, removes the given label
+  (case-sensitive exact match) from the list if present, and PUTs the
+  resulting list back with `{"fields": {"labels": [...]}}`. All other
+  labels on the issue are preserved. If the label is not present, the
+  issue's labels are left unchanged and a friendly message is printed
+  instead of an error, since the desired end state (label absent)
+  already holds.
 
 ## Why it works this way
 
