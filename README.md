@@ -43,6 +43,7 @@ git-ignored and must never be committed.
 | `search`      | Look up issue(s) by issue key or free text and print their full content |
 | `setparent`   | Set an issue's Advanced Roadmaps "Parent Link" field to nest it (e.g. an Epic) under a parent issue |
 | `removelabel` | Remove a single label from an existing issue, leaving all other labels untouched |
+| `refine`      | Read-only scorecard of an issue against the EAWM refinement standard (OK / GAP / MISSING / WARN) |
 
 ### Usage
 
@@ -57,6 +58,7 @@ git-ignored and must never be committed.
 ./jira-cli.sh search      <ISSUE-KEY | "text to search">  [--project <PROJECT-KEY>] [--sprint] [--env <env-file>]
 ./jira-cli.sh setparent   <ISSUE-KEY> <PARENT-ISSUE-KEY>                    [env-file]
 ./jira-cli.sh removelabel <ISSUE-KEY> <label>                               [env-file]
+./jira-cli.sh refine      <ISSUE-KEY>                                       [env-file]
 ```
 
 Running the script with no arguments (or `-h`/`--help`) prints the full
@@ -79,6 +81,7 @@ usage/help text and exits without making any Jira calls.
 ./jira-cli.sh search "Account Re-use" --project EAWM --sprint
 ./jira-cli.sh setparent EAWM-9246 EAWM-9263
 ./jira-cli.sh removelabel EAWM-9246 Team5
+./jira-cli.sh refine EAWM-9295
 ```
 
 ## How each action works
@@ -149,9 +152,15 @@ usage/help text and exits without making any Jira calls.
   summary/description/comments/etc.), optionally narrowed with
   `--project <PROJECT-KEY>` and/or `--sprint` (adds
   `AND sprint in openSprints()`, matching `mysprint`'s open-sprint
-  scoping). Each result prints key, browse URL, issue type, status,
-  assignee, Sprint (id/name/state), full summary/description, and any
-  comments.
+  scoping). Each result prints key, browse URL, issue type, Feature Type
+  (`customfield_23300`), Change Request Type (`customfield_14601`),
+  status, resolution, Story State (`customfield_11700`), priority,
+  assignee, Sprint (id/name/state), Epic (key + Epic Name, via one extra
+  lookup per epic), labels, components, fix version, Story Points
+  (`customfield_10100`), due date, target start/end, full
+  summary/description, Acceptance Criteria (`customfield_10500`),
+  Resolution Description (`customfield_13214`, when set), issue links,
+  and any comments.
 - **`setparent`** — `PUT /rest/api/2/issue/<key>` with
   `{"fields": {"customfield_11703": "<PARENT-ISSUE-KEY>"}}`.
   `customfield_11703` is this instance's Advanced Roadmaps "Parent Link"
@@ -168,6 +177,17 @@ usage/help text and exits without making any Jira calls.
   issue's labels are left unchanged and a friendly message is printed
   instead of an error, since the desired end state (label absent)
   already holds.
+- **`refine`** — Read-only. Fetches one issue and scores it against the
+  EAWM refinement standard in
+  [.github/prompts/refine-eawm.prompt.md](.github/prompts/refine-eawm.prompt.md):
+  Title, Priority (Blocker/Critical/High/Medium/Low), As a / I want to /
+  So that, Complexity/Volume/Risk evaluation rated Low/Medium/High after
+  the user story, Acceptance Criteria (GIVEN/WHEN/THEN preferred,
+  checklist allowed), Feature Type, and Change Request Type — each as
+  OK / GAP / MISSING. Also prints consistency WARNings (resolved with no
+  linked PR, Resolution Description on a resolved issue, Story State
+  "Draft" on a resolved issue, missing Epic/Sprint/Assignee/Due
+  Date/Fix Version). Text checks are heuristics; review the output.
 
 ## Why it works this way
 

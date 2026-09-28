@@ -29,8 +29,11 @@
 #                 name match, e.g. to (re)discover the Epic Link / Sprint
 #                 field ids on this Jira instance
 #   search      - look up issue(s) by issue key OR free-text search, and
-#                 print the FULL content (summary, status, type, assignee,
-#                 sprint, full description, comments) of each match -
+#                 print the FULL content (summary, type, feature/request
+#                 type, status, resolution, story state, priority,
+#                 assignee, sprint, epic, labels, components, fix version,
+#                 story points, due/target dates, full description,
+#                 acceptance criteria, links, comments) of each match -
 #                 optionally scoped to a project and/or the open sprint
 #   recentactivity - list issues owned by (assigned to) a given user
 #                 (default: the PAT owner, or a specific Jira username via
@@ -58,6 +61,10 @@
 #                 parent issue in the Advanced Roadmaps hierarchy)
 #   removelabel - remove a single label from an existing issue's labels
 #                 field, leaving all other labels on the issue untouched
+#   refine      - read-only scorecard of one issue against the EAWM
+#                 refinement standard (.github/prompts/refine-eawm.prompt.md),
+#                 flagging each item OK / GAP / MISSING plus consistency
+#                 WARNings (e.g. "Feature type: MISSING")
 #
 # Usage:
 #   ./jira-cli.sh comment     <ISSUE-KEY> "<comment text>"          [env-file]
@@ -74,6 +81,7 @@
 #   ./jira-cli.sh duesoon      <LABEL> [--project <PROJECT-KEY>] [--days <n>] [--env <env-file>]
 #   ./jira-cli.sh setparent   <ISSUE-KEY> <PARENT-ISSUE-KEY>        [env-file]
 #   ./jira-cli.sh removelabel <ISSUE-KEY> <label>                   [env-file]
+#   ./jira-cli.sh refine      <ISSUE-KEY>                           [env-file]
 #
 # Examples:
 #   ./jira-cli.sh comment EAWM-7384 "Applied topology spread constraints."
@@ -94,6 +102,7 @@
 #   ./jira-cli.sh futureactivity
 #   ./jira-cli.sh futureactivity --user macklin.mcbride@va.gov --project EAWM
 #   ./jira-cli.sh duesoon Infrastructure --project EAWM --days 30
+#   ./jira-cli.sh refine EAWM-9295
 #
 # Notes on 'assign' / create's --assignee (the issue "owner"):
 #   The assignee value must be the Jira account's "name" (username), which
@@ -126,6 +135,21 @@
 #   300 characters for a quick scan, 'search' prints each match's FULL
 #   description (and top-level comments) since the point is to retrieve
 #   complete issue content, not a summary list.
+#
+# Notes on 'refine':
+#   Fetches one issue and checks: Title; Priority in Blocker/Critical/
+#   High/Medium/Low; description contains As a / I want to / So that;
+#   description has Complexity, Volume and Risk evaluations each rated
+#   Low/Medium/High and placed after the user story; Acceptance Criteria
+#   (customfield_10500) present (GIVEN/WHEN/THEN preferred, checklist
+#   allowed); Feature Type (customfield_23300) in Enabler/Feature/Spike;
+#   Change Request Type (customfield_14601) in Development/Enhancement/
+#   Modernization/Research/Sustainment/Technical Debt/Other/None.
+#   Consistency WARNings: resolved with no linked PR (from the Development
+#   field customfield_10006), Resolution Description set on a resolved
+#   issue, Story State (customfield_11700) "Draft" on a resolved issue,
+#   and missing Epic Link / Sprint / Assignee / Due Date / Fix Version.
+#   Text checks are heuristics - review the output, don't treat it as final.
 #
 # Notes on 'transition':
 #   Jira workflows often require multiple hops (e.g. To Do -> In Work ->
@@ -219,7 +243,7 @@
 #
 
 if [[ $# -lt 1 ]]; then
-  echo "Usage: $0 <comment|description|transition|create|assign|link|mysprint|field|search|recentactivity|futureactivity|duesoon|setparent|removelabel> ..." >&2
+  echo "Usage: $0 <comment|description|transition|create|assign|link|mysprint|field|search|recentactivity|futureactivity|duesoon|setparent|removelabel|refine> ..." >&2
   echo "Run with -h for full usage." >&2
   exit 1
 fi
@@ -232,6 +256,8 @@ fi
 ACTION="$1"
 shift
 JIRA_BASE_URL="https://jira.devops.va.gov"
+# Fields shown by 'search' and checked by 'refine'.
+DETAIL_FIELDS="summary,status,issuetype,priority,assignee,description,comment,customfield_10000,customfield_10500,customfield_23300,customfield_14601,labels,components,fixVersions,customfield_10100,duedate,customfield_11704,customfield_11705,customfield_10001,issuelinks,resolution,customfield_13214,customfield_11700"
 
 case "$ACTION" in
   comment|description|transition)
@@ -430,8 +456,16 @@ case "$ACTION" in
     REMOVE_LABEL="$2"
     ENV_FILE="${3:-$(dirname "$0")/.env}"
     ;;
+  refine)
+    if [[ $# -lt 1 ]]; then
+      echo "Usage: $0 refine <ISSUE-KEY> [env-file]" >&2
+      exit 1
+    fi
+    ISSUE_KEY="$1"
+    ENV_FILE="${2:-$(dirname "$0")/.env}"
+    ;;
   *)
-    echo "ERROR: action must be one of comment, description, transition, create, assign, link, mysprint, field, search, recentactivity, futureactivity, duesoon, setparent, removelabel (got '$ACTION')" >&2
+    echo "ERROR: action must be one of comment, description, transition, create, assign, link, mysprint, field, search, recentactivity, futureactivity, duesoon, setparent, removelabel, refine (got '$ACTION')" >&2
     exit 1
     ;;
 esac
@@ -537,17 +571,28 @@ if [[ "$ACTION" == "field" ]]; then
   exit 0
 fi
 
+# Prints a JSON map {"EPIC-KEY": "Epic Name"} for the Epic Links in the given issues array.
+fetch_epic_names() {
+  local map='{}' k name
+  for k in $(jq -r '[.[].fields.customfield_10001 // empty] | unique | .[]' <<<"$1"); do
+    name=$(curl -s -H "Authorization: Bearer $JIRA_PAT" \
+      "${JIRA_BASE_URL}/rest/api/2/issue/${k}?fields=customfield_10003,summary" \
+      | jq -r '.fields.customfield_10003 // .fields.summary // "?"' 2>/dev/null)
+    map=$(jq -c --arg k "$k" --arg n "${name:-?}" '. + {($k): $n}' <<<"$map")
+  done
+  echo "$map"
+}
+
 if [[ "$ACTION" == "search" ]]; then
   # A bare issue key (e.g. EAWM-8812) is fetched directly; anything else is
   # treated as free text for a JQL full-text search.
   if [[ "$SEARCH_QUERY" =~ ^[A-Za-z][A-Za-z0-9]*-[0-9]+$ ]]; then
     RESPONSE=$(curl -s -w '\n%{http_code}' \
       -H "Authorization: Bearer $JIRA_PAT" \
-      "${JIRA_BASE_URL}/rest/api/2/issue/${SEARCH_QUERY}?fields=summary,status,issuetype,assignee,description,comment,customfield_10000")
+      "${JIRA_BASE_URL}/rest/api/2/issue/${SEARCH_QUERY}?fields=${DETAIL_FIELDS}")
 
     HTTP_CODE=$(tail -n1 <<<"$RESPONSE")
     RESPONSE_BODY=$(sed '$d' <<<"$RESPONSE")
-    unset JIRA_PAT
 
     if [[ ! "$HTTP_CODE" =~ ^2 ]]; then
       echo "ERROR: Jira API returned HTTP $HTTP_CODE" >&2
@@ -569,11 +614,10 @@ if [[ "$ACTION" == "search" ]]; then
 
     RESPONSE=$(curl -s -w '\n%{http_code}' \
       -H "Authorization: Bearer $JIRA_PAT" \
-      "${JIRA_BASE_URL}/rest/api/2/search?jql=${ENCODED_JQL}&fields=summary,status,issuetype,assignee,description,comment,customfield_10000&maxResults=50")
+      "${JIRA_BASE_URL}/rest/api/2/search?jql=${ENCODED_JQL}&fields=${DETAIL_FIELDS}&maxResults=50")
 
     HTTP_CODE=$(tail -n1 <<<"$RESPONSE")
     RESPONSE_BODY=$(sed '$d' <<<"$RESPONSE")
-    unset JIRA_PAT
 
     if [[ ! "$HTTP_CODE" =~ ^2 ]]; then
       echo "ERROR: Jira API returned HTTP $HTTP_CODE" >&2
@@ -590,24 +634,148 @@ if [[ "$ACTION" == "search" ]]; then
     ISSUES_JSON=$(jq -c '.issues' <<<"$RESPONSE_BODY")
   fi
 
+  EPICS_JSON=$(fetch_epic_names "$ISSUES_JSON")
+  unset JIRA_PAT
+
   # customfield_10000 (Sprint) comes back as a greenhopper Sprint object
   # toString(), same as 'mysprint' - pull id/name/state out with a regex
   # rather than parsing it as JSON.
-  jq -r --arg base "$JIRA_BASE_URL" '
-    .[] |
-    "Key:         \(.key)\n" +
-    "URL:         \($base)/browse/\(.key)\n" +
-    "Type:        \(.fields.issuetype.name)\n" +
-    "Status:      \(.fields.status.name)\n" +
-    "Assignee:    \(.fields.assignee.displayName // "Unassigned")\n" +
-    "Sprint:      \((.fields.customfield_10000 // ["(none)"])[-1])\n" +
-    "Summary:     \(.fields.summary)\n" +
-    "Description:\n\(.fields.description // "(none)")\n" +
-    (if (.fields.comment.comments | length) > 0 then
-      "Comments:\n" + (.fields.comment.comments | map("  [\(.author.displayName // .author.name)] \(.body)") | join("\n")) + "\n"
+  jq -r --arg base "$JIRA_BASE_URL" --argjson epics "$EPICS_JSON" '
+    def v: if . == null or . == [] or . == "" then "(none)"
+      elif type == "array" then map(if type == "object" then (.value // .name) else tostring end) | join(", ")
+      elif type == "object" then (.value // .name // tostring)
+      else tostring end;
+    def link: if .outwardIssue then "  \(.type.outward) \(.outwardIssue.key) [\(.outwardIssue.fields.status.name)] \(.outwardIssue.fields.summary)"
+      else "  \(.type.inward) \(.inwardIssue.key) [\(.inwardIssue.fields.status.name)] \(.inwardIssue.fields.summary)" end;
+    .[] | .fields as $f |
+    "Key:           \(.key)\n" +
+    "URL:           \($base)/browse/\(.key)\n" +
+    "Type:          \($f.issuetype.name)\n" +
+    "Feature Type:  \($f.customfield_23300 | v)\n" +
+    "Request Type:  \($f.customfield_14601 | v)\n" +
+    "Status:        \($f.status.name)\n" +
+    "Resolution:    \($f.resolution.name // "Unresolved")\n" +
+    "Story State:   \($f.customfield_11700 | v)\n" +
+    "Priority:      \($f.priority.name // "(none)")\n" +
+    "Assignee:      \($f.assignee.displayName // "Unassigned")\n" +
+    "Sprint:        \(($f.customfield_10000 // ["(none)"])[-1])\n" +
+    "Epic:          \(if $f.customfield_10001 then "\($f.customfield_10001) - \($epics[$f.customfield_10001] // "?")" else "(none)" end)\n" +
+    "Labels:        \($f.labels | v)\n" +
+    "Components:    \($f.components | v)\n" +
+    "Fix Version:   \($f.fixVersions | v)\n" +
+    "Story Points:  \($f.customfield_10100 | v)\n" +
+    "Due Date:      \($f.duedate | v)\n" +
+    "Target Start:  \($f.customfield_11704 | v)\n" +
+    "Target End:    \($f.customfield_11705 | v)\n" +
+    "Summary:       \($f.summary)\n" +
+    "Description:\n\($f.description // "(none)")\n" +
+    "Acceptance Criteria:\n\($f.customfield_10500 // "(none)")\n" +
+    (if ($f.customfield_13214 | v) != "(none)" then "Resolution Description: \($f.customfield_13214)\n" else "" end) +
+    "Links:\n" + (if ($f.issuelinks | length) > 0 then ($f.issuelinks | map(link) | join("\n")) else "  (none)" end) + "\n" +
+    (if ($f.comment.comments | length) > 0 then
+      "Comments:\n" + ($f.comment.comments | map("  [\(.author.displayName // .author.name)] \(.body)") | join("\n")) + "\n"
     else "" end) +
     "----------------------------------------"
-  ' <<<"$ISSUES_JSON" | sed -E 's/^Sprint:.*id=([0-9]+),.*name=([^,]+),.*state=([A-Z]+).*$/Sprint:      id=\1 name=\2 state=\3/'
+  ' <<<"$ISSUES_JSON" | sed -E 's/^Sprint:.*id=([0-9]+),.*name=([^,]+),.*state=([A-Z]+).*$/Sprint:        id=\1 name=\2 state=\3/'
+  exit 0
+fi
+
+if [[ "$ACTION" == "refine" ]]; then
+  RESPONSE=$(curl -s -w '\n%{http_code}' \
+    -H "Authorization: Bearer $JIRA_PAT" \
+    "${JIRA_BASE_URL}/rest/api/2/issue/${ISSUE_KEY}?fields=${DETAIL_FIELDS},customfield_10006")
+
+  HTTP_CODE=$(tail -n1 <<<"$RESPONSE")
+  RESPONSE_BODY=$(sed '$d' <<<"$RESPONSE")
+
+  if [[ ! "$HTTP_CODE" =~ ^2 ]]; then
+    unset JIRA_PAT
+    echo "ERROR: Jira API returned HTTP $HTTP_CODE" >&2
+    echo "$RESPONSE_BODY" >&2
+    exit 1
+  fi
+
+  ISSUES_JSON=$(jq -c '[.]' <<<"$RESPONSE_BODY")
+  EPICS_JSON=$(fetch_epic_names "$ISSUES_JSON")
+  unset JIRA_PAT
+
+  jq -r --arg base "$JIRA_BASE_URL" --argjson epics "$EPICS_JSON" '
+    def blank: . == null or . == [] or ((type == "string") and (gsub("\\s"; "") == ""));
+    def val: if type == "object" then .value else . end;
+    def cap: ascii_downcase | (.[0:1] | ascii_upcase) + .[1:];
+    def rating($text; $re): [$text | scan("(?i)" + $re + "[^\\n]*?\\b(low|medium|high)\\b")]
+      | if length > 0 then (.[0][0] | cap) else null end;
+    def row: "  " + (("[" + .s + "]" + "          ")[0:10]) + ((.n + ":" + "                    ")[0:19]) + .x;
+
+    .[0] as $i | $i.fields as $f |
+    # Strip wiki markup so "{*}I want{*}: to" reads as "I want to".
+    (($f.description // "") | gsub("[*{}_]"; "") | gsub(":"; " ") | gsub("[ \\t]+"; " ")) as $d |
+    ($d | ascii_downcase) as $dl |
+    ($f.status.statusCategory.key == "done" or $f.resolution != null) as $done |
+    ([($f.customfield_10006 // "") | tostring | capture("pullrequest=.*?stateCount=(?<n>[0-9]+)") | .n] | .[0] // "?") as $prs |
+    ["Blocker","Critical","High","Medium","Low"] as $pri |
+    ["Enabler","Feature","Spike"] as $fts |
+    ["Development","Enhancement","Modernization","Research","Sustainment","Technical Debt","Other/None"] as $rts |
+
+    [
+      {s: (if $f.summary | blank then "MISSING" else "OK" end), n: "Title", x: ($f.summary // "add a summary title")},
+
+      ($f.priority.name as $p |
+        if $p == null then {s: "MISSING", n: "Priority", x: "set one of \($pri | join("/"))"}
+        elif ($pri | index($p)) then {s: "OK", n: "Priority", x: $p}
+        else {s: "GAP", n: "Priority", x: "\($p) is not one of \($pri | join("/"))"} end),
+
+      ([ (if ($dl | test("\\bas an?\\b")) then empty else "As a" end),
+         (if ($dl | test("\\bi want to\\b")) then empty else "I want to" end),
+         (if ($dl | test("\\bso that\\b")) then empty else "So that" end) ] as $m |
+        {s: (if ($m | length) == 0 then "OK" elif ($m | length) == 3 then "MISSING" else "GAP" end),
+         n: "User story",
+         x: (if ($m | length) == 0 then "As a / I want to / So that present" else "missing: " + ($m | join(", ")) end)}),
+
+      ([["Complexity", rating($d; "complexity")], ["Volume", rating($d; "volume")], ["Risk", rating($d; "\\brisk\\b")]] as $r |
+        [$r[] | select(.[1] == null) | .[0]] as $m |
+        (($dl | index("so that")) as $st | ($dl | index("complexity")) as $cx | ($st != null and $cx != null and $cx < $st)) as $early |
+        {s: (if ($m | length) == 3 then "MISSING" elif ($m | length) > 0 or $early then "GAP" else "OK" end),
+         n: "Evaluation",
+         x: (($r | map("\(.[0])=\(.[1] // "none")") | join(", "))
+             + (if ($m | length) > 0 then " - needs Low/Medium/High for: " + ($m | join(", ")) else "" end)
+             + (if $early then " - move after the user story" else "" end))}),
+
+      (($f.customfield_10500 // "") as $ac |
+        if ($ac | blank) then {s: "MISSING", n: "Acceptance crit.", x: "add GIVEN/WHEN/THEN (or checklist) criteria"}
+        elif ($ac | test("(?i)\\bgiven\\b") and test("(?i)\\bwhen\\b") and test("(?i)\\bthen\\b")) then {s: "OK", n: "Acceptance crit.", x: "GIVEN/WHEN/THEN"}
+        else {s: "OK", n: "Acceptance crit.", x: "checklist - use GIVEN/WHEN/THEN where possible"} end),
+
+      (($f.customfield_23300 | val) as $ft |
+        if $ft == null then {s: "MISSING", n: "Feature type", x: "set one of \($fts | join("/"))"}
+        elif ($fts | index($ft)) then {s: "OK", n: "Feature type", x: $ft}
+        else {s: "GAP", n: "Feature type", x: "\($ft) is not one of \($fts | join("/"))"} end),
+
+      (($f.customfield_14601 | val) as $rt |
+        if $rt == null then {s: "MISSING", n: "Request type", x: "set one of \($rts | join("/"))"}
+        elif ($rts | index($rt)) then {s: "OK", n: "Request type", x: $rt}
+        else {s: "GAP", n: "Request type", x: "\($rt) is not one of \($rts | join("/"))"} end)
+    ] as $std |
+
+    [
+      (if $done and $prs == "0" then {s: "WARN", n: "Pull request", x: "issue is resolved but no pull request is linked"} else empty end),
+      (if $done and ($f.customfield_13214 | blank | not) then {s: "WARN", n: "Resolution desc.", x: "\"\($f.customfield_13214)\" (Resolution: \($f.resolution.name // "none")) - confirm it supports closing"} else empty end),
+      (if $done and (($f.customfield_11700 | val) == "Draft") then {s: "WARN", n: "Story state", x: "Draft on a resolved issue"} else empty end),
+      (if $f.customfield_10001 == null then {s: "WARN", n: "Epic", x: "no Epic Link"} else empty end),
+      (if $f.customfield_10000 | blank then {s: "WARN", n: "Sprint", x: "not in a sprint"} else empty end),
+      (if $f.assignee == null then {s: "WARN", n: "Assignee", x: "unassigned"} else empty end),
+      (if $f.duedate == null then {s: "WARN", n: "Due date", x: "not set"} else empty end),
+      (if $f.fixVersions | blank then {s: "WARN", n: "Fix version", x: "not set"} else empty end)
+    ] as $con |
+
+    ([$std[], $con[]] | map(.s)) as $all |
+    "Refinement check: \($i.key) - \($f.summary)\n" +
+    "\($base)/browse/\($i.key)\n" +
+    "Status: \($f.status.name) | Resolution: \($f.resolution.name // "Unresolved") | Epic: \(if $f.customfield_10001 then "\($f.customfield_10001) - \($epics[$f.customfield_10001] // "?")" else "(none)" end)\n\n" +
+    "Standard (.github/prompts/refine-eawm.prompt.md):\n" + ($std | map(row) | join("\n")) + "\n\n" +
+    "Consistency:\n" + (if ($con | length) == 0 then "  (no issues found)" else ($con | map(row) | join("\n")) end) + "\n\n" +
+    "Totals: \([$all[] | select(. == "OK")] | length) OK, \([$all[] | select(. == "GAP")] | length) GAP, \([$all[] | select(. == "MISSING")] | length) MISSING, \([$all[] | select(. == "WARN")] | length) WARN"
+  ' <<<"$ISSUES_JSON"
   exit 0
 fi
 
