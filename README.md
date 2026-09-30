@@ -44,6 +44,9 @@ git-ignored and must never be committed.
 | `setparent`   | Set an issue's Advanced Roadmaps "Parent Link" field to nest it (e.g. an Epic) under a parent issue |
 | `removelabel` | Remove a single label from an existing issue, leaving all other labels untouched |
 | `refine`      | Read-only scorecard of an issue against the EAWM refinement standard (OK / GAP / MISSING / WARN) |
+| `setcomponent` | Set an existing issue's components field to a single named component (replaces existing components) |
+| `summary`     | Replace an existing issue's summary/title                            |
+| `dates`       | Print status, resolution date, and per-comment author/timestamp for one or more issues |
 
 ### Usage
 
@@ -59,6 +62,9 @@ git-ignored and must never be committed.
 ./jira-cli.sh setparent   <ISSUE-KEY> <PARENT-ISSUE-KEY>                    [env-file]
 ./jira-cli.sh removelabel <ISSUE-KEY> <label>                               [env-file]
 ./jira-cli.sh refine      <ISSUE-KEY>                                       [env-file]
+./jira-cli.sh setcomponent <ISSUE-KEY> <component-name>                     [env-file]
+./jira-cli.sh summary     <ISSUE-KEY> "<new summary/title>"                 [env-file]
+./jira-cli.sh dates       <ISSUE-KEY> [ISSUE-KEY...]                        [--env <env-file>]
 ```
 
 Running the script with no arguments (or `-h`/`--help`) prints the full
@@ -188,6 +194,12 @@ usage/help text and exits without making any Jira calls.
   linked PR, Resolution Description on a resolved issue, Story State
   "Draft" on a resolved issue, missing Epic/Sprint/Assignee/Due
   Date/Fix Version). Text checks are heuristics; review the output.
+- **`setcomponent`** — Resolves the component name to its id via
+  `GET /rest/api/2/project/<project-key>/components` (project key taken
+  from the issue key prefix), then
+  `PUT /rest/api/2/issue/<key>` with `{"fields": {"components": [{"id": "<id>"}]}}`.
+  This replaces any existing components on the issue. Fails with a clear
+  error if no component with that exact name exists in the project.
 
 ## Why it works this way
 
