@@ -183,11 +183,15 @@ usage/help text and exits without making any Jira calls.
   Title, Priority (Blocker/Critical/High/Medium/Low), As a / I want to /
   So that, Complexity/Volume/Risk evaluation rated Low/Medium/High after
   the user story, Acceptance Criteria (GIVEN/WHEN/THEN preferred,
-  checklist allowed), Feature Type, and Change Request Type — each as
-  OK / GAP / MISSING. Also prints consistency WARNings (resolved with no
-  linked PR, Resolution Description on a resolved issue, Story State
-  "Draft" on a resolved issue, missing Epic/Sprint/Assignee/Due
-  Date/Fix Version). Text checks are heuristics; review the output.
+  checklist allowed), Feature Type (Feature/Enabler/Spike/None), and
+  Request Type (`customfield_16455`) — each as OK / GAP / MISSING. Also
+  prints consistency WARNings (resolved with no linked PR, Resolution
+  Description on a resolved issue, Story State "Draft" on a resolved
+  issue, missing Epic/Sprint/Assignee/Due Date/Fix Version). Text checks
+  are heuristics; review the output. Note: this project uses
+  `customfield_16455` for Request Type, not the similarly-named
+  `customfield_14601` ("Change Request Type") or `customfield_17610`
+  (also "Request Type") fields, which are unused on this instance.
 
 ## Why it works this way
 

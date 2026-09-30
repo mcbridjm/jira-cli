@@ -142,9 +142,11 @@
 #   description has Complexity, Volume and Risk evaluations each rated
 #   Low/Medium/High and placed after the user story; Acceptance Criteria
 #   (customfield_10500) present (GIVEN/WHEN/THEN preferred, checklist
-#   allowed); Feature Type (customfield_23300) in Enabler/Feature/Spike;
-#   Change Request Type (customfield_14601) in Development/Enhancement/
-#   Modernization/Research/Sustainment/Technical Debt/Other/None.
+#   allowed); Feature Type (customfield_23300) in Feature/Enabler/Spike/
+#   None; Request Type (customfield_16455) in Development/Enhancement/
+#   Modernization/Research/Sustainment/Technical Debt/Other. (This project
+#   does not use the similarly-named customfield_14601 "Change Request
+#   Type" or customfield_17610 "Request Type" fields.)
 #   Consistency WARNings: resolved with no linked PR (from the Development
 #   field customfield_10006), Resolution Description set on a resolved
 #   issue, Story State (customfield_11700) "Draft" on a resolved issue,
@@ -257,7 +259,7 @@ ACTION="$1"
 shift
 JIRA_BASE_URL="https://jira.devops.va.gov"
 # Fields shown by 'search' and checked by 'refine'.
-DETAIL_FIELDS="summary,status,issuetype,priority,assignee,description,comment,customfield_10000,customfield_10500,customfield_23300,customfield_14601,labels,components,fixVersions,customfield_10100,duedate,customfield_11704,customfield_11705,customfield_10001,issuelinks,resolution,customfield_13214,customfield_11700"
+DETAIL_FIELDS="summary,status,issuetype,priority,assignee,description,comment,customfield_10000,customfield_10500,customfield_23300,customfield_16455,labels,components,fixVersions,customfield_10100,duedate,customfield_11704,customfield_11705,customfield_10001,issuelinks,resolution,customfield_13214,customfield_11700"
 
 case "$ACTION" in
   comment|description|transition)
@@ -652,7 +654,7 @@ if [[ "$ACTION" == "search" ]]; then
     "URL:           \($base)/browse/\(.key)\n" +
     "Type:          \($f.issuetype.name)\n" +
     "Feature Type:  \($f.customfield_23300 | v)\n" +
-    "Request Type:  \($f.customfield_14601 | v)\n" +
+    "Request Type:  \($f.customfield_16455 | v)\n" +
     "Status:        \($f.status.name)\n" +
     "Resolution:    \($f.resolution.name // "Unresolved")\n" +
     "Story State:   \($f.customfield_11700 | v)\n" +
@@ -714,8 +716,8 @@ if [[ "$ACTION" == "refine" ]]; then
     ($f.status.statusCategory.key == "done" or $f.resolution != null) as $done |
     ([($f.customfield_10006 // "") | tostring | capture("pullrequest=.*?stateCount=(?<n>[0-9]+)") | .n] | .[0] // "?") as $prs |
     ["Blocker","Critical","High","Medium","Low"] as $pri |
-    ["Enabler","Feature","Spike"] as $fts |
-    ["Development","Enhancement","Modernization","Research","Sustainment","Technical Debt","Other/None"] as $rts |
+    ["Feature","Enabler","Spike","None"] as $fts |
+    ["Development","Enhancement","Modernization","Research","Sustainment","Technical Debt","Other"] as $rts |
 
     [
       {s: (if $f.summary | blank then "MISSING" else "OK" end), n: "Title", x: ($f.summary // "add a summary title")},
@@ -751,7 +753,7 @@ if [[ "$ACTION" == "refine" ]]; then
         elif ($fts | index($ft)) then {s: "OK", n: "Feature type", x: $ft}
         else {s: "GAP", n: "Feature type", x: "\($ft) is not one of \($fts | join("/"))"} end),
 
-      (($f.customfield_14601 | val) as $rt |
+      (($f.customfield_16455 | val) as $rt |
         if $rt == null then {s: "MISSING", n: "Request type", x: "set one of \($rts | join("/"))"}
         elif ($rts | index($rt)) then {s: "OK", n: "Request type", x: $rt}
         else {s: "GAP", n: "Request type", x: "\($rt) is not one of \($rts | join("/"))"} end)
