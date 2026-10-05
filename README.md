@@ -44,6 +44,7 @@ git-ignored and must never be committed.
 | `setparent`   | Set an issue's Advanced Roadmaps "Parent Link" field to nest it (e.g. an Epic) under a parent issue |
 | `removelabel` | Remove a single label from an existing issue, leaving all other labels untouched |
 | `refine`      | Read-only scorecard of an issue against the EAWM refinement standard (OK / GAP / MISSING / WARN) |
+| `scorecard`   | Read-only monthly "EAWM Product Scorecard" (lead/cycle time, releases, defect severity, red zone risks, throughput); table + optional CSV |
 
 ### Usage
 
@@ -59,6 +60,7 @@ git-ignored and must never be committed.
 ./jira-cli.sh setparent   <ISSUE-KEY> <PARENT-ISSUE-KEY>                    [env-file]
 ./jira-cli.sh removelabel <ISSUE-KEY> <label>                               [env-file]
 ./jira-cli.sh refine      <ISSUE-KEY>                                       [env-file]
+./jira-cli.sh scorecard   [--month YYYY-MM] [--project <PROJECT-KEY>] [--csv <file>] [--env <env-file>]
 ```
 
 Running the script with no arguments (or `-h`/`--help`) prints the full
@@ -82,6 +84,7 @@ usage/help text and exits without making any Jira calls.
 ./jira-cli.sh setparent EAWM-9246 EAWM-9263
 ./jira-cli.sh removelabel EAWM-9246 Team5
 ./jira-cli.sh refine EAWM-9295
+./jira-cli.sh scorecard --month 2026-09 --csv eawm-scorecard.csv
 ```
 
 ## How each action works
@@ -192,6 +195,23 @@ usage/help text and exits without making any Jira calls.
   `customfield_16455` for Request Type, not the similarly-named
   `customfield_14601` ("Change Request Type") or `customfield_17610`
   (also "Request Type") fields, which are unused on this instance.
+- **`scorecard`** — Read-only. Builds the "EAWM Product Scorecard" for one
+  calendar month (`--month`, default = last full month; `--project`,
+  default `EAWM`). `--csv <file>` appends a row (writing the header first
+  if the file is new). The JQL behind each count is printed for checking
+  in Jira's issue navigator. Definitions:
+
+  | Metric | Definition |
+  |---|---|
+  | Lead Time | `created` → first Resolved/Closed (earliest of first status change to Resolved/Closed and `resolutiondate`), for Stories/Bugs whose end date is in the month and still Done. Overall pools Stories + Bugs. |
+  | Cycle Time | First move to In Work / In Progress / Peer Review / In Test → same end date. Issues that skipped those statuses are excluded (count shown). |
+  | Releases | Fix Versions with `released=true` and `releaseDate` in the month (all versions, monthly `R*` and ad hoc). |
+  | Release Cadence | Average days between each in-month release and the previous released version. |
+  | Failed Releases | Not tracked in Jira — always `N/A`; enter manually. |
+  | Sev 1–4 Defects | Bugs created in the month, by Priority: Blocker/Critical=1, High=2, Medium=3, Low=4 (Prod + Non-Prod). The `Severity` field (`customfield_13220`) is too sparsely populated to use. |
+  | Red Zone Risks | Open (not Done) Risks whose Residual risk (`customfield_16486`, else Inherent risk `customfield_16485`) is High, as of the run date. |
+  | Stories Added to Backlog | Stories created in the month. |
+  | Stories / Defect Fixes Released | Done Stories / Bugs whose Fix Version is one of the month's releases. |
 
 ## Why it works this way
 

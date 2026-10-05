@@ -65,6 +65,10 @@
 #                 refinement standard (.github/prompts/refine-eawm.prompt.md),
 #                 flagging each item OK / GAP / MISSING plus consistency
 #                 WARNings (e.g. "Feature type: MISSING")
+#   scorecard   - read-only monthly "EAWM Product Scorecard" (lead/cycle
+#                 time, releases, defect severity counts, red zone risks,
+#                 backlog/release throughput), printed as a table and
+#                 optionally appended to a CSV file
 #
 # Usage:
 #   ./jira-cli.sh comment     <ISSUE-KEY> "<comment text>"          [env-file]
@@ -82,6 +86,7 @@
 #   ./jira-cli.sh setparent   <ISSUE-KEY> <PARENT-ISSUE-KEY>        [env-file]
 #   ./jira-cli.sh removelabel <ISSUE-KEY> <label>                   [env-file]
 #   ./jira-cli.sh refine      <ISSUE-KEY>                           [env-file]
+#   ./jira-cli.sh scorecard   [--month YYYY-MM] [--project <PROJECT-KEY>] [--csv <file>] [--env <env-file>]
 #
 # Examples:
 #   ./jira-cli.sh comment EAWM-7384 "Applied topology spread constraints."
@@ -103,6 +108,7 @@
 #   ./jira-cli.sh futureactivity --user macklin.mcbride@va.gov --project EAWM
 #   ./jira-cli.sh duesoon Infrastructure --project EAWM --days 30
 #   ./jira-cli.sh refine EAWM-9295
+#   ./jira-cli.sh scorecard --month 2026-09 --csv eawm-scorecard.csv
 #
 # Notes on 'assign' / create's --assignee (the issue "owner"):
 #   The assignee value must be the Jira account's "name" (username), which
@@ -243,9 +249,33 @@
 #   this instance exactly (case-sensitive), e.g. "Relates", "Blocks",
 #   "Duplicate".
 #
+# Notes on 'scorecard':
+#   Period is one calendar month (--month, default = last full month).
+#   Defects = issuetype Bug. Stories = issuetype Story.
+#   Lead Time  = created -> first Resolved/Closed (earliest of the first
+#                status change to Resolved/Closed and resolutiondate), for
+#                Stories/Bugs whose end date falls in the month and that
+#                are still Done. Overall = all Stories+Bugs pooled.
+#   Cycle Time = first move to In Work/In Progress/Peer Review/In Test ->
+#                same end date; issues that skipped those are excluded.
+#   Releases   = project Fix Versions with released=true and releaseDate
+#                in the month (all versions, monthly R* and ad hoc).
+#   Release Cadence = avg days between each in-month release and the
+#                released version before it.
+#   Failed Releases = not tracked in Jira; always N/A (enter manually).
+#   Sev 1-4    = Bugs created in the month by Priority: Blocker/Critical=1,
+#                High=2, Medium=3, Low=4 (Prod and Non-Prod combined).
+#   Red Zone Risks = open (not Done) Risks whose Residual risk
+#                (customfield_16486, else Inherent risk customfield_16485)
+#                is High, as of the run date.
+#   Stories Added to Backlog = Stories created in the month.
+#   Stories/Defect Fixes Released = Done Stories/Bugs whose Fix Version
+#                is one of the month's releases.
+#   The JQL behind each count is printed so it can be checked in Jira.
+#
 
 if [[ $# -lt 1 ]]; then
-  echo "Usage: $0 <comment|description|transition|create|assign|link|mysprint|field|search|recentactivity|futureactivity|duesoon|setparent|removelabel|refine> ..." >&2
+  echo "Usage: $0 <comment|description|transition|create|assign|link|mysprint|field|search|recentactivity|futureactivity|duesoon|setparent|removelabel|refine|scorecard> ..." >&2
   echo "Run with -h for full usage." >&2
   exit 1
 fi
@@ -466,8 +496,36 @@ case "$ACTION" in
     ISSUE_KEY="$1"
     ENV_FILE="${2:-$(dirname "$0")/.env}"
     ;;
+  scorecard)
+    SC_MONTH="$(date -d "$(date +%Y-%m-01) -1 month" +%Y-%m)"
+    SC_PROJECT="EAWM"
+    SC_CSV=""
+    ENV_FILE="$(dirname "$0")/.env"
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --month)   SC_MONTH="$2"; shift 2 ;;
+        --project) SC_PROJECT="$2"; shift 2 ;;
+        --csv)     SC_CSV="$2"; shift 2 ;;
+        --env)     ENV_FILE="$2"; shift 2 ;;
+        *)
+          echo "ERROR: unrecognized scorecard option '$1'" >&2
+          echo "Usage: $0 scorecard [--month YYYY-MM] [--project <PROJECT-KEY>] [--csv <file>] [--env <env-file>]" >&2
+          exit 1
+          ;;
+      esac
+    done
+    # Both values are interpolated into JQL, so restrict them strictly.
+    if [[ ! "$SC_MONTH" =~ ^[0-9]{4}-(0[1-9]|1[0-2])$ ]]; then
+      echo "ERROR: --month must be YYYY-MM (got '$SC_MONTH')" >&2
+      exit 1
+    fi
+    if [[ ! "$SC_PROJECT" =~ ^[A-Z][A-Z0-9_]+$ ]]; then
+      echo "ERROR: --project must be a Jira project key (got '$SC_PROJECT')" >&2
+      exit 1
+    fi
+    ;;
   *)
-    echo "ERROR: action must be one of comment, description, transition, create, assign, link, mysprint, field, search, recentactivity, futureactivity, duesoon, setparent, removelabel, refine (got '$ACTION')" >&2
+    echo "ERROR: action must be one of comment, description, transition, create, assign, link, mysprint, field, search, recentactivity, futureactivity, duesoon, setparent, removelabel, refine, scorecard (got '$ACTION')" >&2
     exit 1
     ;;
 esac
@@ -1015,6 +1073,197 @@ if [[ "$ACTION" == "removelabel" ]]; then
     echo "$RESPONSE_BODY" >&2
     exit 1
   fi
+fi
+
+if [[ "$ACTION" == "scorecard" ]]; then
+  M_START="${SC_MONTH}-01"
+  M_END=$(date -d "${M_START} +1 month" +%Y-%m-%d)
+  P="$SC_PROJECT"
+  SC_TMP=$(mktemp -d)
+  trap 'rm -rf "$SC_TMP"' EXIT
+  SC_QUERIES=()
+
+  sc_count() {
+    local enc body
+    enc=$(jq -rn --arg j "$1" '$j|@uri')
+    body=$(curl -s -f -H "Authorization: Bearer ${JIRA_PAT}" \
+      "${JIRA_BASE_URL}/rest/api/2/search?jql=${enc}&maxResults=0") \
+      || { echo "ERROR: Jira search failed for JQL: $1" >&2; return 1; }
+    jq -r '.total' <<<"$body"
+  }
+
+  # Writes issues as NDJSON to a file; large JSON must not go through argv on Windows.
+  sc_fetch() {
+    local enc start=0 total=1 got
+    enc=$(jq -rn --arg j "$1" '$j|@uri')
+    : > "$4"
+    while (( start < total )); do
+      curl -s -f -H "Authorization: Bearer ${JIRA_PAT}" \
+        "${JIRA_BASE_URL}/rest/api/2/search?jql=${enc}&fields=$2&maxResults=100&startAt=${start}${3:+&expand=$3}" \
+        > "$4.page" || { echo "ERROR: Jira search failed for JQL: $1" >&2; return 1; }
+      total=$(jq -r '.total' "$4.page")
+      got=$(jq -r '.issues | length' "$4.page")
+      jq -c '.issues[]' "$4.page" >> "$4"
+      (( got == 0 )) && break
+      start=$((start + got))
+    done
+  }
+
+  # Lead / cycle time
+  LC_JQL="project = ${P} AND issuetype in (Story, Bug) AND statusCategory = Done AND ((resolved >= \"${M_START}\" AND resolved < \"${M_END}\") OR status changed to (Resolved, Closed) during (\"${M_START}\", \"${M_END}\"))"
+  sc_fetch "$LC_JQL" "issuetype,created,resolutiondate" changelog "$SC_TMP/lc.ndjson" || exit 1
+  SC_QUERIES+=("Lead/Cycle candidates|$LC_JQL")
+  LC=$(jq -s --arg m "$SC_MONTH" '
+    def ts: (.[0:19] + "Z" | fromdateiso8601) as $t
+      | .[-5:] as $o
+      | (($o[1:3] | tonumber) * 3600 + ($o[3:5] | tonumber) * 60) as $off
+      | if $o[0:1] == "-" then $t + $off else $t - $off end;
+    def avg: if length == 0 then null else (add / length * 10 | round / 10) end;
+    [ .[]
+      | [ (.changelog.histories // [])[] | .created as $c | .items[]
+          | select(.field == "status") | {c: $c, to: .toString} ] as $moves
+      | ([ $moves[] | select(.to == "Resolved" or .to == "Closed") | .c ]
+          + [ .fields.resolutiondate // empty ]
+          | map({c: ., t: ts}) | min_by(.t)) as $end
+      | select($end != null and $end.c[0:7] == $m)
+      | ([ $moves[] | select(.to | IN("In Work", "In Progress", "Peer Review", "In Test")) | .c | ts ] | min) as $start
+      | { type: .fields.issuetype.name,
+          lead: (($end.t - (.fields.created | ts)) / 86400),
+          cycle: (if $start != null and $start <= $end.t then ($end.t - $start) / 86400 else null end) }
+    ] as $rows
+    | { story_lead:  ([ $rows[] | select(.type == "Story") | .lead ] | avg),
+        bug_lead:    ([ $rows[] | select(.type == "Bug") | .lead ] | avg),
+        all_lead:    ([ $rows[].lead ] | avg),
+        story_cycle: ([ $rows[] | select(.type == "Story" and .cycle != null) | .cycle ] | avg),
+        bug_cycle:   ([ $rows[] | select(.type == "Bug" and .cycle != null) | .cycle ] | avg),
+        all_cycle:   ([ $rows[] | select(.cycle != null) | .cycle ] | avg),
+        n_story:     ([ $rows[] | select(.type == "Story") ] | length),
+        n_bug:       ([ $rows[] | select(.type == "Bug") ] | length),
+        no_cycle:    ([ $rows[] | select(.cycle == null) ] | length) }
+  ' "$SC_TMP/lc.ndjson")
+
+  # Releases
+  curl -s -f -H "Authorization: Bearer ${JIRA_PAT}" \
+    "${JIRA_BASE_URL}/rest/api/2/project/${P}/versions" > "$SC_TMP/versions.json" \
+    || { echo "ERROR: could not fetch versions for ${P}" >&2; exit 1; }
+  REL=$(jq --arg m "$SC_MONTH" '
+    def day: . + "T00:00:00Z" | fromdateiso8601;
+    [ .[] | select(.released == true and .releaseDate != null) ] | sort_by(.releaseDate) as $all
+    | [ range(0; $all | length) as $i | $all[$i] | select(.releaseDate[0:7] == $m)
+        | { id, name,
+            gap: (if $i > 0 then ((.releaseDate | day) - ($all[$i - 1].releaseDate | day)) / 86400 else null end) } ] as $in
+    | { count: ($in | length),
+        cadence: ([ $in[].gap | select(. != null) ] | if length == 0 then null else (add / length * 10 | round / 10) end),
+        ids: ([ $in[].id ] | join(",")),
+        names: ([ $in[].name ] | join(", ")) }
+  ' "$SC_TMP/versions.json")
+  REL_IDS=$(jq -r '.ids' <<<"$REL")
+
+  # Defect severity (by Priority)
+  BUG_CREATED="project = ${P} AND issuetype = Bug AND created >= \"${M_START}\" AND created < \"${M_END}\""
+  declare -A SEV_PRI=([1]="Blocker, Critical" [2]="High" [3]="Medium" [4]="Low")
+  declare -A SEV
+  for s in 1 2 3 4; do
+    q="${BUG_CREATED} AND priority in (${SEV_PRI[$s]})"
+    SEV[$s]=$(sc_count "$q") || exit 1
+    SC_QUERIES+=("Sev $s|$q")
+  done
+  BUG_TOTAL=$(sc_count "$BUG_CREATED") || exit 1
+  SEV_UNMAPPED=$(( BUG_TOTAL - SEV[1] - SEV[2] - SEV[3] - SEV[4] ))
+
+  # Red zone risks
+  RISK_JQL="project = ${P} AND issuetype = Risk AND statusCategory != Done"
+  sc_fetch "$RISK_JQL" "customfield_16485,customfield_16486" "" "$SC_TMP/risk.ndjson" || exit 1
+  SC_QUERIES+=("Open risks (filtered to High client-side)|$RISK_JQL")
+  # Exposure fields come back as a Java toString, e.g. "Exposure{id=84, name='High', ...}".
+  RED=$(jq -s '
+    def exposure: if . == null then null elif type == "object" then .name
+      else ([ tostring | capture("name=.(?<n>[A-Za-z ]+)") ][0].n) end;
+    [ .[] | ((.fields.customfield_16486 | exposure) // (.fields.customfield_16485 | exposure))
+      | select(. != null and test("High$")) ] | length
+  ' "$SC_TMP/risk.ndjson")
+
+  # Throughput
+  q="project = ${P} AND issuetype = Story AND created >= \"${M_START}\" AND created < \"${M_END}\""
+  STORIES_ADDED=$(sc_count "$q") || exit 1
+  SC_QUERIES+=("Stories added|$q")
+  STORIES_REL=0
+  BUGS_REL=0
+  if [[ -n "$REL_IDS" ]]; then
+    q="project = ${P} AND issuetype = Story AND statusCategory = Done AND fixVersion in (${REL_IDS})"
+    STORIES_REL=$(sc_count "$q") || exit 1
+    SC_QUERIES+=("Stories released|$q")
+    q="project = ${P} AND issuetype = Bug AND statusCategory = Done AND fixVersion in (${REL_IDS})"
+    BUGS_REL=$(sc_count "$q") || exit 1
+    SC_QUERIES+=("Defect fixes released|$q")
+  fi
+  unset JIRA_PAT
+
+  na() { if [[ -z "$1" || "$1" == "null" ]]; then echo "N/A"; else echo "$1"; fi; }
+  HEADERS=(
+    "Story Lead Time (Average) (Days)"
+    "Defect Lead Time (Average) (Days)"
+    "Lead Time (Overall Average) (Days)"
+    "Story Cycle Time (Average) (Days)"
+    "Defect Cycle Time (Average) (Days)"
+    "Cycle Time (Overall Average) (Days)"
+    "Releases (Count)"
+    "Release Cadence (Average) (Days)"
+    "Failed Releases (Count)"
+    "Sev 1 Prod/Non-Prod Defects (Count)"
+    "Sev 2 Prod/Non-Prod Defects (Count)"
+    "Sev 3 Prod/Non-Prod Defects (Count)"
+    "Sev 4 Prod/Non-Prod Defects (Count)"
+    "Red Zone Risks (# Open)"
+    "Stories Added to Backlog (Count)"
+    "Stories Released to Production (Count)"
+    "Defect Fixes Released to Production (Count)"
+  )
+  VALUES=(
+    "$(na "$(jq -r '.story_lead' <<<"$LC")")"
+    "$(na "$(jq -r '.bug_lead' <<<"$LC")")"
+    "$(na "$(jq -r '.all_lead' <<<"$LC")")"
+    "$(na "$(jq -r '.story_cycle' <<<"$LC")")"
+    "$(na "$(jq -r '.bug_cycle' <<<"$LC")")"
+    "$(na "$(jq -r '.all_cycle' <<<"$LC")")"
+    "$(jq -r '.count' <<<"$REL")"
+    "$(na "$(jq -r '.cadence' <<<"$REL")")"
+    "N/A"
+    "${SEV[1]}" "${SEV[2]}" "${SEV[3]}" "${SEV[4]}"
+    "$RED"
+    "$STORIES_ADDED"
+    "$STORIES_REL"
+    "$BUGS_REL"
+  )
+
+  echo "${P} Product Scorecard - ${SC_MONTH}"
+  echo "========================================================================"
+  for i in "${!HEADERS[@]}"; do
+    printf '  %-46s %s\n' "${HEADERS[$i]}" "${VALUES[$i]}"
+  done
+  echo
+  echo "Notes:"
+  echo "  Lead/cycle sample: $(jq -r '.n_story' <<<"$LC") stories, $(jq -r '.n_bug' <<<"$LC") defects first resolved/closed in ${SC_MONTH};"
+  echo "    $(jq -r '.no_cycle' <<<"$LC") never entered an In Progress status (excluded from cycle time)."
+  echo "  Releases in month: $(na "$(jq -r '.names' <<<"$REL")")"
+  echo "  Failed Releases: not tracked in Jira - enter manually."
+  echo "  Sev = Bug priority (Blocker/Critical=1, High=2, Medium=3, Low=4); ${SEV_UNMAPPED} bug(s) created in month had another priority."
+  echo "  Red Zone = open Risks with Residual (else Inherent) risk High, as of $(date +%Y-%m-%d)."
+  echo
+  echo "JQL used:"
+  for entry in "${SC_QUERIES[@]}"; do
+    printf '  %s:\n    %s\n' "${entry%%|*}" "${entry#*|}"
+  done
+
+  if [[ -n "$SC_CSV" ]]; then
+    if [[ ! -s "$SC_CSV" ]]; then
+      jq -rn '$ARGS.positional | @csv' --args "Month" "${HEADERS[@]}" > "$SC_CSV"
+    fi
+    jq -rn '$ARGS.positional | @csv' --args "$SC_MONTH" "${VALUES[@]}" >> "$SC_CSV"
+    echo
+    echo "Appended ${SC_MONTH} row to ${SC_CSV}"
+  fi
+  exit 0
 fi
 
 case "$ACTION" in
