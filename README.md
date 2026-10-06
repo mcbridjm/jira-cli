@@ -44,6 +44,9 @@ git-ignored and must never be committed.
 | `setparent`   | Set an issue's Advanced Roadmaps "Parent Link" field to nest it (e.g. an Epic) under a parent issue |
 | `removelabel` | Remove a single label from an existing issue, leaving all other labels untouched |
 | `refine`      | Read-only scorecard of an issue against the EAWM refinement standard (OK / GAP / MISSING / WARN) |
+| `setcomponent` | Set an existing issue's components field to a single named component (replaces existing components) |
+| `summary`     | Replace an existing issue's summary/title |
+| `dates`       | Print status, resolution date, and per-comment author/timestamp for one or more issues |
 | `scorecard`   | Read-only monthly "EAWM Product Scorecard" (lead/cycle time, releases, defect severity, red zone risks, throughput); table + optional CSV |
 | `sprintreview` | Read-only end-of-sprint carryover review of one sprint's not-Done issues, flagging any without an assignee rollover comment; table + optional CSV |
 
@@ -61,6 +64,9 @@ git-ignored and must never be committed.
 ./jira-cli.sh setparent   <ISSUE-KEY> <PARENT-ISSUE-KEY>                    [env-file]
 ./jira-cli.sh removelabel <ISSUE-KEY> <label>                               [env-file]
 ./jira-cli.sh refine      <ISSUE-KEY>                                       [env-file]
+./jira-cli.sh setcomponent <ISSUE-KEY> <component-name>                     [env-file]
+./jira-cli.sh summary     <ISSUE-KEY> "<new summary/title>"                 [env-file]
+./jira-cli.sh dates       <ISSUE-KEY> [ISSUE-KEY...]                        [--env <env-file>]
 ./jira-cli.sh scorecard   [--month YYYY-MM] [--project <PROJECT-KEY>] [--csv <file>] [--env <env-file>]
 ./jira-cli.sh sprintreview <SPRINT-ID> [--project <PROJECT-KEY>] [--since YYYY-MM-DD] [--csv <file>] [--env <env-file>]
 ```
@@ -189,20 +195,10 @@ usage/help text and exits without making any Jira calls.
   Title, Priority (Blocker/Critical/High/Medium/Low), As a / I want to /
   So that, Complexity/Volume/Risk evaluation rated Low/Medium/High after
   the user story, Acceptance Criteria (GIVEN/WHEN/THEN preferred,
-  checklist allowed), Feature Type (Feature/Enabler/Spike/None), and
-  Request Type (`customfield_16455`) — each as OK / GAP / MISSING. Also
-  prints consistency WARNings (resolved with no linked PR, Resolution
-  Description on a resolved issue, Story State "Draft" on a resolved
-  issue, missing Epic/Sprint/Assignee/Due Date/Fix Version). Text checks
-  are heuristics; review the output. Note: this project uses
-  `customfield_16455` for Request Type, not the similarly-named
-  `customfield_14601` ("Change Request Type") or `customfield_17610`
-  (also "Request Type") fields, which are unused on this instance.
-- **`scorecard`** — Read-only. Builds the "EAWM Product Scorecard" for one
-  calendar month (`--month`, default = last full month; `--project`,
-  default `EAWM`). `--csv <file>` appends a row (writing the header first
-  if the file is new). The JQL behind each count is printed for checking
-  in Jira's issue navigator. Definitions:
+- **`setcomponent`** — Resolves the component name to its id via `GET /rest/api/2/project/<project-key>/components` (project key taken from the issue key prefix), then `PUT /rest/api/2/issue/<key>` with `{"fields": {"components": [{"id": "<id>"}]}}`. This replaces any existing components on the issue. Fails with a clear error if no component with that exact name exists in the project.
+- **`summary`** — Replace an existing issue's summary/title.
+- **`dates`** — Print status, resolution date, and per-comment author/timestamp for one or more issues.
+- **`scorecard`** — Read-only. Builds the "EAWM Product Scorecard" for one calendar month (`--month`, default = last full month; `--project`, default `EAWM`). `--csv <file>` appends a row (writing the header first if the file is new). The JQL behind each count is printed for checking in Jira's issue navigator. Definitions:
 
   | Metric | Definition |
   |---|---|
@@ -216,16 +212,7 @@ usage/help text and exits without making any Jira calls.
   | Stories Added to Backlog | Stories created in the month. |
   | Stories / Defect Fixes Released | Done Stories / Bugs whose Fix Version is one of the month's releases. |
 
-- **`sprintreview`** — Read-only. Runs `project = P AND sprint = <ID> AND
-  statusCategory != Done AND issuetype not in subTaskIssueTypes()` with the
-  changelog, groups issues by swimlane (Planned / Not Started, Sprint
-  TO-DO, In Progress = In Work/In Progress/Peer Review/In Test, else Other)
-  and prints days in current status, other sprints, components, open "is
-  blocked by" links, last comment, and a **Rollover note** = YES only if
-  the *assignee* commented on/after `--since` (default: sprint start date)
-  mentioning rollover / carry over / next sprint / FY27Q1 / SP1 / moved to.
-  Issues in the first three lanes without one are listed under NEEDS
-  COMMENT. `--csv <file>` writes (overwrites) one row per issue.
+- **`sprintreview`** — Read-only. Runs `project = P AND sprint = <ID> AND statusCategory != Done AND issuetype not in subTaskIssueTypes()` with the changelog, groups issues by swimlane (Planned / Not Started, Sprint TO-DO, In Progress = In Work/In Progress/Peer Review/In Test, else Other) and prints days in current status, other sprints, components, open "is blocked by" links, last comment, and a **Rollover note** = YES only if the *assignee* commented on/after `--since` (default: sprint start date) mentioning rollover / carry over / next sprint / FY27Q1 / SP1 / moved to. Issues in the first three lanes without one are listed under NEEDS COMMENT. `--csv <file>` writes (overwrites) one row per issue.
 
 ## Why it works this way
 

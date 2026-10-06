@@ -11,6 +11,7 @@
 # Actions:
 #   comment     - add a comment to an existing issue
 #   description - replace an existing issue's description
+#   summary     - replace an existing issue's summary/title
 #   transition  - move an existing issue to a new status (single workflow
 #                 hop only - see notes below for multi-step workflows)
 #   create      - create a new issue in a project, optionally setting its
@@ -73,10 +74,19 @@
 #                 not-Done issue in one sprint, grouped by swimlane, with
 #                 days in status, other sprints, blockers, last comment,
 #                 and whether the assignee left a rollover comment
+#   setcomponent - set an existing issue's components field to a single
+#                 named component (replacing any existing components),
+#                 resolving the component name to its id via the
+#                 project's components endpoint first
+#   dates       - print status, resolution date, and per-comment author
+#                 + timestamp for one or more issues (useful for citing
+#                 when an issue was evaluated/completed, since 'search'
+#                 does not surface comment/resolution timestamps)
 #
 # Usage:
 #   ./jira-cli.sh comment     <ISSUE-KEY> "<comment text>"          [env-file]
 #   ./jira-cli.sh description <ISSUE-KEY> "<description text>"     [env-file]
+#   ./jira-cli.sh summary     <ISSUE-KEY> "<new summary/title>"     [env-file]
 #   ./jira-cli.sh transition  <ISSUE-KEY> "<target status name>"   [env-file]
 #   ./jira-cli.sh create      <PROJECT-KEY> "<summary>" "<description>" [--type <issuetype>] [--assignee <username>] [--epic <EPIC-KEY>] [--sprint <sprint-id>] [--labels <label1,label2>] [--component <name>] [--epicname <name>] [--env <env-file>]
 #   ./jira-cli.sh assign      <ISSUE-KEY> <assignee-username>       [env-file]
@@ -92,6 +102,8 @@
 #   ./jira-cli.sh refine      <ISSUE-KEY>                           [env-file]
 #   ./jira-cli.sh scorecard   [--month YYYY-MM] [--project <PROJECT-KEY>] [--csv <file>] [--env <env-file>]
 #   ./jira-cli.sh sprintreview <SPRINT-ID> [--project <PROJECT-KEY>] [--since YYYY-MM-DD] [--csv <file>] [--env <env-file>]
+#   ./jira-cli.sh setcomponent <ISSUE-KEY> <component-name>         [env-file]
+#   ./jira-cli.sh dates       <ISSUE-KEY> [ISSUE-KEY...]            [--env <env-file>]
 #
 # Examples:
 #   ./jira-cli.sh comment EAWM-7384 "Applied topology spread constraints."
@@ -291,7 +303,7 @@
 #
 
 if [[ $# -lt 1 ]]; then
-  echo "Usage: $0 <comment|description|transition|create|assign|link|mysprint|field|search|recentactivity|futureactivity|duesoon|setparent|removelabel|refine|scorecard|sprintreview> ..." >&2
+  echo "Usage: $0 <comment|description|summary|transition|create|assign|link|mysprint|field|search|recentactivity|futureactivity|duesoon|setparent|removelabel|setcomponent|dates|refine|scorecard|sprintreview> ..." >&2
   echo "Run with -h for full usage." >&2
   exit 1
 fi
@@ -308,7 +320,7 @@ JIRA_BASE_URL="https://jira.devops.va.gov"
 DETAIL_FIELDS="summary,status,issuetype,priority,assignee,description,comment,customfield_10000,customfield_10500,customfield_23300,customfield_16455,labels,components,fixVersions,customfield_10100,duedate,customfield_11704,customfield_11705,customfield_10001,issuelinks,resolution,customfield_13214,customfield_11700"
 
 case "$ACTION" in
-  comment|description|transition)
+  comment|description|transition|summary)
     if [[ $# -lt 2 ]]; then
       echo "Usage: $0 $ACTION <ISSUE-KEY> \"<text>\" [env-file]" >&2
       exit 1
@@ -579,8 +591,31 @@ case "$ACTION" in
       exit 1
     fi
     ;;
+  setcomponent)
+    if [[ $# -lt 2 ]]; then
+      echo "Usage: $0 setcomponent <ISSUE-KEY> <component-name> [env-file]" >&2
+      exit 1
+    fi
+    ISSUE_KEY="$1"
+    SET_COMPONENT="$2"
+    ENV_FILE="${3:-$(dirname "$0")/.env}"
+    ;;
+  dates)
+    if [[ $# -lt 1 ]]; then
+      echo "Usage: $0 dates <ISSUE-KEY> [ISSUE-KEY...] [--env <env-file>]" >&2
+      exit 1
+    fi
+    DATES_KEYS=()
+    ENV_FILE="$(dirname "$0")/.env"
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --env) ENV_FILE="$2"; shift 2 ;;
+        *) DATES_KEYS+=("$1"); shift ;;
+      esac
+    done
+    ;;
   *)
-    echo "ERROR: action must be one of comment, description, transition, create, assign, link, mysprint, field, search, recentactivity, futureactivity, duesoon, setparent, removelabel, refine, scorecard, sprintreview (got '$ACTION')" >&2
+    echo "ERROR: action must be one of comment, description, summary, transition, create, assign, link, mysprint, field, search, recentactivity, futureactivity, duesoon, setparent, removelabel, setcomponent, dates, refine, scorecard, sprintreview (got '$ACTION')" >&2
     exit 1
     ;;
 esac
@@ -1427,6 +1462,81 @@ if [[ "$ACTION" == "sprintreview" ]]; then
     echo
     echo "Wrote ${SR_CSV}"
   fi
+
+  exit 0
+fi
+
+if [[ "$ACTION" == "setcomponent" ]]; then
+  # Sets the issue's components field to a single named component,
+  # replacing any existing components (mirrors 'removelabel' style: a
+  # GET to resolve the component name to an id, then a PUT to apply it).
+  COMPONENTS_RESPONSE=$(curl -s -w '\n%{http_code}' \
+    -H "Authorization: Bearer $JIRA_PAT" \
+    "${JIRA_BASE_URL}/rest/api/2/project/${ISSUE_KEY%%-*}/components")
+
+  COMPONENTS_HTTP_CODE=$(tail -n1 <<<"$COMPONENTS_RESPONSE")
+  COMPONENTS_BODY=$(sed '$d' <<<"$COMPONENTS_RESPONSE")
+
+  if [[ ! "$COMPONENTS_HTTP_CODE" =~ ^2 ]]; then
+    unset JIRA_PAT
+    echo "ERROR: Jira API returned HTTP $COMPONENTS_HTTP_CODE (fetching components)" >&2
+    echo "$COMPONENTS_BODY" >&2
+    exit 1
+  fi
+
+  COMPONENT_ID=$(jq -r --arg name "$SET_COMPONENT" '.[] | select(.name == $name) | .id' <<<"$COMPONENTS_BODY" | head -n1)
+  if [[ -z "$COMPONENT_ID" ]]; then
+    unset JIRA_PAT
+    echo "ERROR: no component named '${SET_COMPONENT}' found in this project" >&2
+    exit 1
+  fi
+
+  BODY_JSON=$(jq -n --arg id "$COMPONENT_ID" '{fields: {components: [{id: $id}]}}')
+
+  RESPONSE=$(curl -s -w '\n%{http_code}' \
+    -X PUT \
+    -H "Authorization: Bearer $JIRA_PAT" \
+    -H "Content-Type: application/json" \
+    -d "$BODY_JSON" \
+    "${JIRA_BASE_URL}/rest/api/2/issue/${ISSUE_KEY}")
+
+  HTTP_CODE=$(tail -n1 <<<"$RESPONSE")
+  RESPONSE_BODY=$(sed '$d' <<<"$RESPONSE")
+  unset JIRA_PAT
+
+  if [[ "$HTTP_CODE" =~ ^2 ]]; then
+    echo "Set component '${SET_COMPONENT}' on ${ISSUE_KEY} successfully (HTTP $HTTP_CODE)."
+    exit 0
+  else
+    echo "ERROR: Jira API returned HTTP $HTTP_CODE" >&2
+    echo "$RESPONSE_BODY" >&2
+    exit 1
+  fi
+fi
+
+if [[ "$ACTION" == "dates" ]]; then
+  for KEY in "${DATES_KEYS[@]}"; do
+    RESPONSE=$(curl -s -w '\n%{http_code}' \
+      -H "Authorization: Bearer $JIRA_PAT" \
+      "${JIRA_BASE_URL}/rest/api/2/issue/${KEY}?fields=comment,status,resolutiondate")
+    HTTP_CODE=$(tail -n1 <<<"$RESPONSE")
+    RESPONSE_BODY=$(sed '$d' <<<"$RESPONSE")
+
+    echo "=== $KEY ==="
+    if [[ "$HTTP_CODE" =~ ^2 ]]; then
+      jq -r '.fields.status.name as $s | .fields.resolutiondate as $r |
+        "Status: \($s)  Resolved: \($r)\n" +
+        ((.fields.comment.comments // []) | map("  [\(.author.displayName)] \(.created)\n  \(.body[0:200])") | join("\n---\n"))' \
+        <<<"$RESPONSE_BODY"
+    else
+      echo "ERROR: Jira API returned HTTP $HTTP_CODE" >&2
+      echo "$RESPONSE_BODY" >&2
+    fi
+    echo
+  done
+  unset JIRA_PAT
+  exit 0
+fi
   exit 0
 fi
 
@@ -1438,6 +1548,11 @@ case "$ACTION" in
     ;;
   description)
     BODY_JSON=$(jq -n --arg desc "$TEXT" '{fields: {description: $desc}}')
+    URL="${JIRA_BASE_URL}/rest/api/2/issue/${ISSUE_KEY}"
+    METHOD="PUT"
+    ;;
+  summary)
+    BODY_JSON=$(jq -n --arg s "$TEXT" '{fields: {summary: $s}}')
     URL="${JIRA_BASE_URL}/rest/api/2/issue/${ISSUE_KEY}"
     METHOD="PUT"
     ;;
