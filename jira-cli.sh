@@ -69,6 +69,10 @@
 #                 time, releases, defect severity counts, red zone risks,
 #                 backlog/release throughput), printed as a table and
 #                 optionally appended to a CSV file
+#   sprintreview - read-only end-of-sprint carryover review: every
+#                 not-Done issue in one sprint, grouped by swimlane, with
+#                 days in status, other sprints, blockers, last comment,
+#                 and whether the assignee left a rollover comment
 #
 # Usage:
 #   ./jira-cli.sh comment     <ISSUE-KEY> "<comment text>"          [env-file]
@@ -87,6 +91,7 @@
 #   ./jira-cli.sh removelabel <ISSUE-KEY> <label>                   [env-file]
 #   ./jira-cli.sh refine      <ISSUE-KEY>                           [env-file]
 #   ./jira-cli.sh scorecard   [--month YYYY-MM] [--project <PROJECT-KEY>] [--csv <file>] [--env <env-file>]
+#   ./jira-cli.sh sprintreview <SPRINT-ID> [--project <PROJECT-KEY>] [--since YYYY-MM-DD] [--csv <file>] [--env <env-file>]
 #
 # Examples:
 #   ./jira-cli.sh comment EAWM-7384 "Applied topology spread constraints."
@@ -109,6 +114,7 @@
 #   ./jira-cli.sh duesoon Infrastructure --project EAWM --days 30
 #   ./jira-cli.sh refine EAWM-9295
 #   ./jira-cli.sh scorecard --month 2026-09 --csv eawm-scorecard.csv
+#   ./jira-cli.sh sprintreview 52479 --project EAWM --csv sp7-review.csv
 #
 # Notes on 'assign' / create's --assignee (the issue "owner"):
 #   The assignee value must be the Jira account's "name" (username), which
@@ -273,9 +279,19 @@
 #                is one of the month's releases.
 #   The JQL behind each count is printed so it can be checked in Jira.
 #
+# Notes on 'sprintreview':
+#   JQL: project = P AND sprint = <ID> AND statusCategory != Done AND
+#   issuetype not in subTaskIssueTypes(). Swimlane is derived from the
+#   status name: Planned / Not Started, Sprint TO-DO, In Progress (In
+#   Work/In Progress/Peer Review/In Test), else Other (not Done).
+#   "Rollover note" = YES only if a comment by the ASSIGNEE, dated on/after
+#   --since (default: the sprint's start date), mentions rollover/carry
+#   over/next sprint/FY27Q1/SP1/moved to. Issues in the first three lanes
+#   without one are listed under NEEDS COMMENT. Nothing is written to Jira.
+#
 
 if [[ $# -lt 1 ]]; then
-  echo "Usage: $0 <comment|description|transition|create|assign|link|mysprint|field|search|recentactivity|futureactivity|duesoon|setparent|removelabel|refine|scorecard> ..." >&2
+  echo "Usage: $0 <comment|description|transition|create|assign|link|mysprint|field|search|recentactivity|futureactivity|duesoon|setparent|removelabel|refine|scorecard|sprintreview> ..." >&2
   echo "Run with -h for full usage." >&2
   exit 1
 fi
@@ -524,8 +540,47 @@ case "$ACTION" in
       exit 1
     fi
     ;;
+  sprintreview)
+    SR_USAGE="Usage: $0 sprintreview <SPRINT-ID> [--project <PROJECT-KEY>] [--since YYYY-MM-DD] [--csv <file>] [--env <env-file>]"
+    if [[ $# -lt 1 ]]; then
+      echo "$SR_USAGE" >&2
+      exit 1
+    fi
+    SR_SPRINT="$1"
+    shift
+    SR_PROJECT="EAWM"
+    SR_SINCE=""
+    SR_CSV=""
+    ENV_FILE="$(dirname "$0")/.env"
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --project) SR_PROJECT="$2"; shift 2 ;;
+        --since)   SR_SINCE="$2"; shift 2 ;;
+        --csv)     SR_CSV="$2"; shift 2 ;;
+        --env)     ENV_FILE="$2"; shift 2 ;;
+        *)
+          echo "ERROR: unrecognized sprintreview option '$1'" >&2
+          echo "$SR_USAGE" >&2
+          exit 1
+          ;;
+      esac
+    done
+    # Sprint id and project are interpolated into JQL, so restrict them strictly.
+    if [[ ! "$SR_SPRINT" =~ ^[0-9]+$ ]]; then
+      echo "ERROR: <SPRINT-ID> must be a numeric sprint id (got '$SR_SPRINT')" >&2
+      exit 1
+    fi
+    if [[ ! "$SR_PROJECT" =~ ^[A-Z][A-Z0-9_]+$ ]]; then
+      echo "ERROR: --project must be a Jira project key (got '$SR_PROJECT')" >&2
+      exit 1
+    fi
+    if [[ -n "$SR_SINCE" && ! "$SR_SINCE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+      echo "ERROR: --since must be YYYY-MM-DD (got '$SR_SINCE')" >&2
+      exit 1
+    fi
+    ;;
   *)
-    echo "ERROR: action must be one of comment, description, transition, create, assign, link, mysprint, field, search, recentactivity, futureactivity, duesoon, setparent, removelabel, refine, scorecard (got '$ACTION')" >&2
+    echo "ERROR: action must be one of comment, description, transition, create, assign, link, mysprint, field, search, recentactivity, futureactivity, duesoon, setparent, removelabel, refine, scorecard, sprintreview (got '$ACTION')" >&2
     exit 1
     ;;
 esac
@@ -1262,6 +1317,115 @@ if [[ "$ACTION" == "scorecard" ]]; then
     jq -rn '$ARGS.positional | @csv' --args "$SC_MONTH" "${VALUES[@]}" >> "$SC_CSV"
     echo
     echo "Appended ${SC_MONTH} row to ${SC_CSV}"
+  fi
+  exit 0
+fi
+
+if [[ "$ACTION" == "sprintreview" ]]; then
+  SR_TMP=$(mktemp -d)
+  trap 'rm -rf "$SR_TMP"' EXIT
+  SR_JQL="project = ${SR_PROJECT} AND sprint = ${SR_SPRINT} AND statusCategory != Done AND issuetype not in subTaskIssueTypes()"
+  SR_ENC=$(jq -rn --arg j "$SR_JQL" '$j|@uri')
+  : > "$SR_TMP/issues.ndjson"
+  start=0
+  total=1
+  while (( start < total )); do
+    curl -s -f -H "Authorization: Bearer ${JIRA_PAT}" \
+      "${JIRA_BASE_URL}/rest/api/2/search?jql=${SR_ENC}&fields=summary,status,issuetype,assignee,components,customfield_10000,issuelinks,comment,created&expand=changelog&maxResults=50&startAt=${start}" \
+      > "$SR_TMP/page.json" || { echo "ERROR: Jira search failed for JQL: $SR_JQL" >&2; exit 1; }
+    total=$(jq -r '.total' "$SR_TMP/page.json")
+    got=$(jq -r '.issues | length' "$SR_TMP/page.json")
+    jq -c '.issues[]' "$SR_TMP/page.json" >> "$SR_TMP/issues.ndjson"
+    (( got == 0 )) && break
+    start=$((start + got))
+  done
+  unset JIRA_PAT
+
+  jq -s \
+    --arg sid "$SR_SPRINT" \
+    --arg since "$SR_SINCE" \
+    --arg base "$JIRA_BASE_URL" \
+    --arg re 'roll.?over|carr(y|ied).?over|next sprint|FY27Q1|SP-?1\b|move[ds]? to|push(ed)? to' '
+    def d: .[0:19] + "Z" | fromdateiso8601;
+    def lane: ascii_downcase as $s |
+      if $s | test("to.?do") then "2 Sprint TO-DO"
+      elif $s | test("planned|not started|backlog|open") then "1 Planned / Not Started"
+      elif $s | test("in work|in progress|peer review|in test|in review") then "3 In Progress"
+      else "4 Other (not Done)" end;
+    def snip: gsub("\\s+"; " ") | .[0:200];
+    map(
+      .fields as $f |
+      ($f.customfield_10000 // []) as $sp |
+      (($sp | map(select(test("id=" + $sid + "[,\\]]"))) | .[0]) // "") as $cur |
+      (if $since != "" then $since
+       else ((try ($cur | capture("startDate=(?<d>[0-9]{4}-[0-9]{2}-[0-9]{2})").d) catch null) // "") end) as $from |
+      ($f.assignee.name // "") as $who |
+      ($f.comment.comments // []) as $cs |
+      (([.changelog.histories[]? | select(any(.items[]; .field == "status")) | .created] | last) // $f.created) as $statusAt |
+      {
+        key,
+        url: ($base + "/browse/" + .key),
+        type: $f.issuetype.name,
+        status: $f.status.name,
+        lane: ($f.status.name | lane),
+        assignee: ($f.assignee.displayName // "(unassigned)"),
+        assigneeName: $who,
+        summary: $f.summary,
+        daysInStatus: ((now - ($statusAt | d)) / 86400 | floor),
+        otherSprints: [$sp[] | select(. != $cur) | (try capture("name=(?<n>[^,\\]]*)").n catch .)],
+        components: [$f.components[]?.name],
+        blockers: [$f.issuelinks[]?
+          | select(.type.inward == "is blocked by" and .inwardIssue != null
+                   and .inwardIssue.fields.status.statusCategory.key != "done")
+          | .inwardIssue.key + " (" + .inwardIssue.fields.status.name + ")"],
+        lastComment: ($cs | last | if . then {author: .author.displayName, date: .created[0:10], text: (.body | snip)} else null end),
+        rollover: ([$cs[] | select($who != "" and .author.name == $who and .created[0:10] >= $from and (.body | test($re; "i")))]
+          | last | if . then {date: .created[0:10], text: (.body | snip)} else null end),
+        from: $from
+      }
+    ) | sort_by(.lane, .assignee, .key)
+  ' "$SR_TMP/issues.ndjson" > "$SR_TMP/rows.json"
+
+  echo "Sprint review - sprint ${SR_SPRINT} (${SR_PROJECT}) - $(date +%Y-%m-%d)"
+  echo "JQL: ${SR_JQL}"
+  jq -r '
+    def list: if length > 0 then join(", ") else "none" end;
+    group_by(.lane)[] |
+    "\n=== " + (.[0].lane | .[2:]) + " (" + (length | tostring) + ") ===",
+    (.[] |
+      "\n" + .key + "  [" + .status + "]  " + .type + " - " + .summary,
+      "  URL:            " + .url,
+      "  Assignee:       " + .assignee,
+      "  Days in status: " + (.daysInStatus | tostring),
+      "  Other sprints:  " + (.otherSprints | list),
+      "  Components:     " + (.components | list),
+      "  Blocked by:     " + (.blockers | list),
+      "  Last comment:   " + (if .lastComment then .lastComment.date + " " + .lastComment.author + ": " + .lastComment.text else "(none)" end),
+      "  Rollover note:  " + (if .rollover then "YES " + .rollover.date + ": " + .rollover.text else "NO (assignee comment since " + (if .from == "" then "?" else .from end) + " not found)" end))
+  ' "$SR_TMP/rows.json"
+
+  echo
+  echo "=== Summary ==="
+  jq -r '
+    "  Total not Done: " + (length | tostring),
+    (group_by(.lane)[] | "  " + (.[0].lane | .[2:]) + ": " + (length | tostring)),
+    "",
+    "NEEDS COMMENT (Planned / Sprint TO-DO / In Progress, no assignee rollover note):",
+    ([.[] | select((.lane | startswith("4")) | not) | select(.rollover == null)]
+      | if length == 0 then "  none" else .[] | "  " + .key + "  " + .assignee + " <" + .assigneeName + ">  [" + .status + "]" end)
+  ' "$SR_TMP/rows.json"
+
+  if [[ -n "$SR_CSV" ]]; then
+    jq -r '
+      ["Key","Lane","Status","Type","Summary","Assignee","AssigneeUser","DaysInStatus","OtherSprints","Components","BlockedBy","LastCommentDate","LastCommentAuthor","RolloverNote","RolloverDate","URL"],
+      (.[] | [.key, (.lane | .[2:]), .status, .type, .summary, .assignee, .assigneeName, .daysInStatus,
+              (.otherSprints | join("; ")), (.components | join("; ")), (.blockers | join("; ")),
+              (.lastComment.date // ""), (.lastComment.author // ""),
+              (if .rollover then "YES" else "NO" end), (.rollover.date // ""), .url])
+      | @csv
+    ' "$SR_TMP/rows.json" > "$SR_CSV"
+    echo
+    echo "Wrote ${SR_CSV}"
   fi
   exit 0
 fi

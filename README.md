@@ -45,6 +45,7 @@ git-ignored and must never be committed.
 | `removelabel` | Remove a single label from an existing issue, leaving all other labels untouched |
 | `refine`      | Read-only scorecard of an issue against the EAWM refinement standard (OK / GAP / MISSING / WARN) |
 | `scorecard`   | Read-only monthly "EAWM Product Scorecard" (lead/cycle time, releases, defect severity, red zone risks, throughput); table + optional CSV |
+| `sprintreview` | Read-only end-of-sprint carryover review of one sprint's not-Done issues, flagging any without an assignee rollover comment; table + optional CSV |
 
 ### Usage
 
@@ -61,6 +62,7 @@ git-ignored and must never be committed.
 ./jira-cli.sh removelabel <ISSUE-KEY> <label>                               [env-file]
 ./jira-cli.sh refine      <ISSUE-KEY>                                       [env-file]
 ./jira-cli.sh scorecard   [--month YYYY-MM] [--project <PROJECT-KEY>] [--csv <file>] [--env <env-file>]
+./jira-cli.sh sprintreview <SPRINT-ID> [--project <PROJECT-KEY>] [--since YYYY-MM-DD] [--csv <file>] [--env <env-file>]
 ```
 
 Running the script with no arguments (or `-h`/`--help`) prints the full
@@ -85,6 +87,7 @@ usage/help text and exits without making any Jira calls.
 ./jira-cli.sh removelabel EAWM-9246 Team5
 ./jira-cli.sh refine EAWM-9295
 ./jira-cli.sh scorecard --month 2026-09 --csv eawm-scorecard.csv
+./jira-cli.sh sprintreview 52479 --project EAWM --csv sp7-review.csv
 ```
 
 ## How each action works
@@ -212,6 +215,17 @@ usage/help text and exits without making any Jira calls.
   | Red Zone Risks | Open (not Done) Risks whose Residual risk (`customfield_16486`, else Inherent risk `customfield_16485`) is High, as of the run date. |
   | Stories Added to Backlog | Stories created in the month. |
   | Stories / Defect Fixes Released | Done Stories / Bugs whose Fix Version is one of the month's releases. |
+
+- **`sprintreview`** — Read-only. Runs `project = P AND sprint = <ID> AND
+  statusCategory != Done AND issuetype not in subTaskIssueTypes()` with the
+  changelog, groups issues by swimlane (Planned / Not Started, Sprint
+  TO-DO, In Progress = In Work/In Progress/Peer Review/In Test, else Other)
+  and prints days in current status, other sprints, components, open "is
+  blocked by" links, last comment, and a **Rollover note** = YES only if
+  the *assignee* commented on/after `--since` (default: sprint start date)
+  mentioning rollover / carry over / next sprint / FY27Q1 / SP1 / moved to.
+  Issues in the first three lanes without one are listed under NEEDS
+  COMMENT. `--csv <file>` writes (overwrites) one row per issue.
 
 ## Why it works this way
 
