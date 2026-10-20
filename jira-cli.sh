@@ -131,21 +131,15 @@
 # Notes on 'assign' / create's --assignee (the issue "owner"):
 #   The assignee value must be the Jira account's "name" (username), which
 #   on this Server/Data Center instance is the user's login (often their
-#   email address, e.g. adam.schaefer2@va.gov) - NOT a Cloud accountId.
+#   email address, e.g. mcbridjm@us.ibm.com) - NOT a Cloud accountId.
 #   You can look it up with:
 #     curl -s -H "Authorization: Bearer $PAT" \
-#       "https://jira.devops.va.gov/rest/api/2/user/search?username=<email>"
+#       "${JIRA_BASE_URL}/rest/api/2/user/search?username=<email>"
 #
 # Notes on create's --epic / --sprint:
-#   These map to custom fields discovered via the 'field' action on this
-#   instance: Epic Link = customfield_10001 (takes the epic's issue key,
-#   e.g. EAWM-8837) and Sprint = customfield_10000 (takes the sprint's
-#   numeric id, e.g. 52476 - NOT its display name). Run
-#   `./jira-cli.sh mysprint <PROJECT-KEY>` to see the active
-#   sprint's id/name from issues already in it, or
-#   `./jira-cli.sh field sprint` / `field epic` to re-discover the
-#   field ids if this ever changes (e.g. on a different Jira project or
-#   instance where custom field ids differ).
+#   These map to custom fields on IBM Jira (https://jsw.ibm.com):
+#   Epic Link = customfield_10100 (or customfield_10001), Sprint = customfield_10104 (or customfield_10000).
+#   Run `./jira-cli.sh mysprint <PROJECT-KEY>` to see the active sprint's id/name.
 #
 # Notes on 'search':
 #   If the query looks like an issue key (e.g. EAWM-8812 - letters, a dash,
@@ -315,9 +309,9 @@ fi
 
 ACTION="$1"
 shift
-JIRA_BASE_URL="https://jira.devops.va.gov"
+JIRA_BASE_URL="${JIRA_BASE_URL:-https://jsw.ibm.com}"
 # Fields shown by 'search' and checked by 'refine'.
-DETAIL_FIELDS="summary,status,issuetype,priority,assignee,description,comment,customfield_10000,customfield_10500,customfield_23300,customfield_16455,labels,components,fixVersions,customfield_10100,duedate,customfield_11704,customfield_11705,customfield_10001,issuelinks,resolution,customfield_13214,customfield_11700"
+DETAIL_FIELDS="summary,status,issuetype,priority,assignee,description,comment,customfield_10104,customfield_10000,customfield_10200,customfield_10500,customfield_32301,customfield_23300,customfield_18400,customfield_16455,labels,components,fixVersions,customfield_10106,customfield_10100,duedate,customfield_11602,customfield_11704,customfield_11603,customfield_11705,customfield_10102,customfield_10003,customfield_10001,issuelinks,resolution,customfield_13214,customfield_11700"
 
 case "$ACTION" in
   comment|description|transition|summary)
@@ -632,6 +626,9 @@ if [[ -z "${PAT:-}" && -f "$ENV_FILE" ]]; then
   set +a
 fi
 
+JIRA_BASE_URL="${JIRA_BASE_URL:-https://jsw.ibm.com}"
+JIRA_BASE_URL="${JIRA_BASE_URL%/}"
+
 if [[ -n "${PAT:-}" ]]; then
   JIRA_PAT="$PAT"
 else
@@ -658,7 +655,7 @@ if [[ "$ACTION" == "mysprint" ]]; then
 
   RESPONSE=$(curl -s -w '\n%{http_code}' \
     -H "Authorization: Bearer ${JIRA_PAT}" \
-    "${JIRA_BASE_URL}/rest/api/2/search?jql=${ENCODED_JQL}&fields=summary,status,issuetype,description,customfield_10000")
+    "${JIRA_BASE_URL}/rest/api/2/search?jql=${ENCODED_JQL}&fields=summary,status,issuetype,description,customfield_10104,customfield_10000")
 
   HTTP_CODE=$(tail -n1 <<<"$RESPONSE")
   RESPONSE_BODY=$(sed '$d' <<<"$RESPONSE")
@@ -686,7 +683,7 @@ if [[ "$ACTION" == "mysprint" ]]; then
     "URL:         \($base)/browse/\(.key)\n" +
     "Type:        \(.fields.issuetype.name)\n" +
     "Status:      \(.fields.status.name)\n" +
-    "Sprint:      \((.fields.customfield_10000 // ["(none)"])[-1])\n" +
+    "Sprint:      \((.fields.customfield_10104 // .fields.customfield_10000 // ["(none)"])[-1])\n" +
     "Summary:     \(.fields.summary)\n" +
     "Description: \((.fields.description // "(none)") | if length > 300 then .[0:300] + "..." else . end)\n" +
     "----------------------------------------"
@@ -724,10 +721,10 @@ fi
 # Prints a JSON map {"EPIC-KEY": "Epic Name"} for the Epic Links in the given issues array.
 fetch_epic_names() {
   local map='{}' k name
-  for k in $(jq -r '[.[].fields.customfield_10001 // empty] | unique | .[]' <<<"$1"); do
+  for k in $(jq -r '[.[].fields | (.customfield_10100 // .customfield_10001 // empty)] | unique | .[]' <<<"$1"); do
     name=$(curl -s -H "Authorization: Bearer $JIRA_PAT" \
-      "${JIRA_BASE_URL}/rest/api/2/issue/${k}?fields=customfield_10003,summary" \
-      | jq -r '.fields.customfield_10003 // .fields.summary // "?"' 2>/dev/null)
+      "${JIRA_BASE_URL}/rest/api/2/issue/${k}?fields=customfield_10102,customfield_10003,summary" \
+      | jq -r '.fields.customfield_10102 // .fields.customfield_10003 // .fields.summary // "?"' 2>/dev/null)
     map=$(jq -c --arg k "$k" --arg n "${name:-?}" '. + {($k): $n}' <<<"$map")
   done
   echo "$map"
@@ -801,25 +798,25 @@ if [[ "$ACTION" == "search" ]]; then
     "Key:           \(.key)\n" +
     "URL:           \($base)/browse/\(.key)\n" +
     "Type:          \($f.issuetype.name)\n" +
-    "Feature Type:  \($f.customfield_23300 | v)\n" +
-    "Request Type:  \($f.customfield_16455 | v)\n" +
+    "Feature Type:  \(($f.customfield_32301 // $f.customfield_23300) | v)\n" +
+    "Request Type:  \(($f.customfield_18400 // $f.customfield_16455) | v)\n" +
     "Status:        \($f.status.name)\n" +
     "Resolution:    \($f.resolution.name // "Unresolved")\n" +
     "Story State:   \($f.customfield_11700 | v)\n" +
     "Priority:      \($f.priority.name // "(none)")\n" +
     "Assignee:      \($f.assignee.displayName // "Unassigned")\n" +
-    "Sprint:        \(($f.customfield_10000 // ["(none)"])[-1])\n" +
-    "Epic:          \(if $f.customfield_10001 then "\($f.customfield_10001) - \($epics[$f.customfield_10001] // "?")" else "(none)" end)\n" +
+    "Sprint:        \(($f.customfield_10104 // $f.customfield_10000 // ["(none)"])[-1])\n" +
+    "Epic:          \(if ($f.customfield_10100 // $f.customfield_10001) then "\($f.customfield_10100 // $f.customfield_10001) - \($epics[$f.customfield_10100 // $f.customfield_10001] // "?")" else "(none)" end)\n" +
     "Labels:        \($f.labels | v)\n" +
     "Components:    \($f.components | v)\n" +
     "Fix Version:   \($f.fixVersions | v)\n" +
-    "Story Points:  \($f.customfield_10100 | v)\n" +
+    "Story Points:  \(($f.customfield_10106 // $f.customfield_10100) | v)\n" +
     "Due Date:      \($f.duedate | v)\n" +
-    "Target Start:  \($f.customfield_11704 | v)\n" +
-    "Target End:    \($f.customfield_11705 | v)\n" +
+    "Target Start:  \(($f.customfield_11602 // $f.customfield_11704) | v)\n" +
+    "Target End:    \(($f.customfield_11603 // $f.customfield_11705) | v)\n" +
     "Summary:       \($f.summary)\n" +
     "Description:\n\($f.description // "(none)")\n" +
-    "Acceptance Criteria:\n\($f.customfield_10500 // "(none)")\n" +
+    "Acceptance Criteria:\n\(($f.customfield_10200 // $f.customfield_10500) // "(none)")\n" +
     (if ($f.customfield_13214 | v) != "(none)" then "Resolution Description: \($f.customfield_13214)\n" else "" end) +
     "Links:\n" + (if ($f.issuelinks | length) > 0 then ($f.issuelinks | map(link) | join("\n")) else "  (none)" end) + "\n" +
     (if ($f.comment.comments | length) > 0 then
@@ -1579,6 +1576,9 @@ case "$ACTION" in
     METHOD="POST"
     ;;
   create)
+    EPIC_FIELD="${EPIC_LINK_FIELD:-customfield_10100}"
+    SPRINT_FIELD="${SPRINT_FIELD:-customfield_10104}"
+    EPIC_NAME_FIELD="${EPIC_NAME_FIELD:-customfield_10102}"
     BODY_JSON=$(jq -n \
       --arg project "$PROJECT_KEY" \
       --arg issuetype "$ISSUETYPE" \
@@ -1586,17 +1586,20 @@ case "$ACTION" in
       --arg description "$DESCRIPTION" \
       --arg assignee "$ASSIGNEE" \
       --arg epic "$EPIC_LINK" \
+      --arg epic_field "$EPIC_FIELD" \
       --arg sprint "$SPRINT_ID" \
+      --arg sprint_field "$SPRINT_FIELD" \
       --arg labels "$LABELS" \
       --arg component "$COMPONENT" \
       --arg epicname "$EPIC_NAME" \
+      --arg epicname_field "$EPIC_NAME_FIELD" \
       '{fields: ({project: {key: $project}, issuetype: {name: $issuetype}, summary: $summary, description: $description}
         + (if $assignee != "" then {assignee: {name: $assignee}} else {} end)
-        + (if $epic != "" then {customfield_10001: $epic} else {} end)
-        + (if $sprint != "" then {customfield_10000: ($sprint | tonumber)} else {} end)
+        + (if $epic != "" then {($epic_field): $epic} else {} end)
+        + (if $sprint != "" then {($sprint_field): ($sprint | tonumber)} else {} end)
         + (if $labels != "" then {labels: ($labels | split(",") | map(select(length > 0)))} else {} end)
         + (if $component != "" then {components: [{name: $component}]} else {} end)
-        + (if $epicname != "" then {customfield_10003: $epicname} else {} end))}')
+        + (if $epicname != "" then {($epicname_field): $epicname} else {} end))}')
     URL="${JIRA_BASE_URL}/rest/api/2/issue"
     METHOD="POST"
     ;;
@@ -1615,7 +1618,8 @@ case "$ACTION" in
     METHOD="POST"
     ;;
   setparent)
-    BODY_JSON=$(jq -n --arg parent "$PARENT_KEY" '{fields: {customfield_11703: $parent}}')
+    PARENT_FIELD="${PARENT_LINK_FIELD:-customfield_11601}"
+    BODY_JSON=$(jq -n --arg parent "$PARENT_KEY" --arg field "$PARENT_FIELD" '{fields: {($field): $parent}}')
     URL="${JIRA_BASE_URL}/rest/api/2/issue/${ISSUE_KEY}"
     METHOD="PUT"
     ;;

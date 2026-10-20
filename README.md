@@ -1,7 +1,7 @@
-# jira-cli.sh
+# IBM jira-cli (IBM_Jira-cli)
 
 A single, function-agnostic bash script for automating common Jira actions
-against `https://jira.devops.va.gov` (a Jira Server/Data Center instance)
+against `https://jsw.ibm.com` (IBM Jira Server/Data Center)
 using a Personal Access Token (PAT) — without ever having to type the PAT
 interactively.
 
@@ -13,7 +13,13 @@ containing:
 
 ```
 PAT=<your Jira personal access token>
+JIRA_BASE_URL=https://jsw.ibm.com
 ```
+
+To generate your PAT:
+1. Log in to [https://jsw.ibm.com](https://jsw.ibm.com)
+2. Go to **Profile** → **Personal Access Tokens** (`https://jsw.ibm.com/secure/ViewProfile.jspa`)
+3. Create a token and copy it into `.env`
 
 Copy `.env.example` to `.env` and fill in your own PAT. `.env` is
 git-ignored and must never be committed.
@@ -77,23 +83,18 @@ usage/help text and exits without making any Jira calls.
 ### Examples
 
 ```bash
-./jira-cli.sh comment EAWM-7384 "Applied topology spread constraints."
-./jira-cli.sh description EAWM-7384 "$(cat new-description.txt)"
-./jira-cli.sh transition EAWM-7384 "Resolved"
-./jira-cli.sh create EAWM "Promote topology spread constraints to Production" "$(cat followup-desc.txt)" --type Story --assignee adam.schaefer2@va.gov
-./jira-cli.sh create EAWM "Research OCR true-up" "$(cat desc.txt)" --epic EAWM-8837 --sprint 52476 --assignee adam.schaefer2@va.gov
-./jira-cli.sh create EAWM "Cloud Spend Savings" "$(cat epic-desc.txt)" --type Epic --epicname "Cloud Spend Savings" --assignee adam.schaefer2@va.gov
-./jira-cli.sh create EAWM "Summary" "$(cat desc.txt)" --epic EAWM-9221 --sprint 55011 --component FY27Q1 --assignee penny.swigart@va.gov
-./jira-cli.sh assign EAWM-7385 adam.schaefer2@va.gov
-./jira-cli.sh mysprint EAWM
+./jira-cli.sh search UME-26
+./jira-cli.sh comment UME-26 "MAS upgrade status update."
+./jira-cli.sh description UME-26 "$(cat new-description.txt)"
+./jira-cli.sh transition UME-26 "In Progress"
+./jira-cli.sh create UME "MAS Upgrade to 9.2" "$(cat followup-desc.txt)" --type Story --assignee mcbridjm@us.ibm.com
+./jira-cli.sh create UME "Research true-up" "$(cat desc.txt)" --epic UME-2 --sprint 260583 --assignee mcbridjm@us.ibm.com
+./jira-cli.sh assign UME-26 mcbridjm@us.ibm.com
+./jira-cli.sh mysprint UME
 ./jira-cli.sh field sprint
-./jira-cli.sh search EAWM-8812
-./jira-cli.sh search "Account Re-use" --project EAWM --sprint
-./jira-cli.sh setparent EAWM-9246 EAWM-9263
-./jira-cli.sh removelabel EAWM-9246 Team5
-./jira-cli.sh refine EAWM-9295
-./jira-cli.sh scorecard --month 2026-09 --csv eawm-scorecard.csv
-./jira-cli.sh sprintreview 52479 --project EAWM --csv sp7-review.csv
+./jira-cli.sh search "MAS Upgrade" --project UME --sprint
+./jira-cli.sh setparent UME-26 UME-2
+./jira-cli.sh removelabel UME-26 Temporary
 ```
 
 ## How each action works

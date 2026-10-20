@@ -1,9 +1,6 @@
-# Jira + Copilot CLI Automation
+# IBM Jira + Copilot CLI Automation
 
-This folder documents and hosts the pattern established during this session
-for driving Jira (`https://jira.devops.va.gov`) directly from GitHub Copilot
-CLI, using a Personal Access Token (PAT) instead of interactive OAuth/login,
-so an assistant can read/write Jira issues non-interactively on your behalf.
+This folder documents and hosts the pattern established for driving IBM Jira (`https://jsw.ibm.com`) directly from GitHub Copilot / CLI, using a Personal Access Token (PAT) instead of interactive OAuth/login, so an assistant can read/write Jira issues non-interactively on your behalf.
 
 ## Contents
 
