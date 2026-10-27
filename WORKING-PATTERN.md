@@ -52,13 +52,21 @@ This folder documents and hosts the pattern established for driving IBM Jira (`h
 
 6. **Single-hop transitions, explicit multi-hop chaining.** Jira
    workflows often require multiple transitions to reach a target status
-   (e.g. To Do → In Work → Resolved). The `transition` action deliberately
+   (e.g. To Do → In Work → Resolved/Done). The `transition` action deliberately
    performs only one hop per invocation and prints the available next
    hops if the target isn't directly reachable — the assistant confirms
    each hop with you rather than auto-chaining, since intermediate
    statuses can trigger their own notifications/side effects.
 
-7. **Non-destructive create.** Jira validates issue creation atomically,
+7. **Mandatory Resolution Description on Story Closure.** Whenever closing
+   a story (transitioning to `Done` / `Resolved`):
+   - A comprehensive **Resolution Description** must be generated synthesizing
+     the original user story, verification of acceptance criteria, and all
+     outcomes/deliverables/links recorded in the story's comments.
+   - The Resolution Description is posted as a closing comment on the story
+     before or alongside the status transition.
+
+8. **Non-destructive create.** Jira validates issue creation atomically,
    so a `create` call that's missing a required field fails cleanly
    without leaving a partial issue behind — this let us skip Jira's
    `createmeta` endpoint entirely (it's blocked/disabled on this VA
